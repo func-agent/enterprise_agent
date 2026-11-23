@@ -1,0 +1,97 @@
+{{/* ===================================================================
+  非敏感配置 ConfigMap
+  —— Web UI 反向代理配置（与 compose/deploy 的 nginx/webui.conf 保持一致）
+  —— 平台共享配置（白名单、realm、预算等，可在 Deployment 中引用）
+  =================================================================== */}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "eap.fullname" . }}-webui-nginx
+  namespace: {{ include "eap.ns.app" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: webui
+data:
+  webui.conf: |
+    server {
+        listen       {{ .Values.appLayer.webui.service.port }};
+        server_name  _;
+
+        root  /usr/share/nginx/html;
+        index index.html;
+
+        location = /healthz {
+            access_log off;
+            default_type text/plain;
+            return 200 "ok\n";
+        }
+
+        # —— AgentScope AG-UI SSE
+        location /ag-ui {
+            proxy_pass         http://{{ include "eap.fullname" . }}-agent-core.{{ include "eap.ns.app" . }}.svc:{{ .Values.appLayer.agentCore.service.port }};
+            proxy_http_version 1.1;
+            proxy_set_header   Host              $host;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+            proxy_set_header   Connection        "";
+            proxy_read_timeout 600s;
+            proxy_send_timeout 600s;
+            proxy_buffering    off;
+        }
+
+        # —— AgentScope Service（会话管理 / HITL 人工确认）
+        location {{ .Values.ingress.paths.api }}/ {
+            proxy_pass         http://{{ include "eap.fullname" . }}-agent-core.{{ include "eap.ns.app" . }}.svc:{{ .Values.appLayer.agentCore.service.port }};
+            proxy_http_version 1.1;
+            proxy_set_header   Host              $host;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+            proxy_set_header   Connection        "";
+            proxy_read_timeout 300s;
+            proxy_buffering    off;
+        }
+
+        # —— agentgateway（OpenAI 兼容接口 / MCP 治理）
+        location {{ .Values.ingress.paths.gateway }}/ {
+            proxy_pass         http://{{ include "eap.fullname" . }}-agentgateway.{{ include "eap.ns.app" . }}.svc:{{ .Values.gatewayLayer.gateway.service.port }};
+            proxy_http_version 1.1;
+            proxy_set_header   Host              $host;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+            proxy_set_header   Connection        "";
+            proxy_read_timeout 600s;
+            proxy_buffering    off;
+        }
+
+        location / {
+            try_files $uri $uri/ /index.html;
+        }
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "eap.fullname" . }}-platform-config
+  namespace: {{ include "eap.ns.app" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+data:
+  # —— 出网白名单（见 8.3 出网安全 / 9.3 网络要求）
+  EGRESS_ALLOWED_HOSTS: {{ join "," .Values.securityLayer.envoy.allowedHosts | quote }}
+  # —— 身份（见 7.1 身份与多租户）
+  KEYCLOAK_REALM: {{ .Values.identityLayer.keycloak.realm.name | quote }}
+  KEYCLOAK_BASE_URL: {{ printf "http://%s-keycloak.%s.svc:%v" (include "eap.fullname" .) (include "eap.ns.support" .) .Values.identityLayer.keycloak.service.port | quote }}
+  KEYCLOAK_ISSUER: {{ printf "%s/realms/%s,http://%s-keycloak.%s.svc:%v/realms/%s" .Values.identityLayer.keycloak.publicUrl .Values.identityLayer.keycloak.realm.name (include "eap.fullname" .) (include "eap.ns.support" .) .Values.identityLayer.keycloak.service.port .Values.identityLayer.keycloak.realm.name | quote }}
+  # 浏览器可达的 Keycloak 地址（控制台 OIDC 授权跳转用）——
+  # 容器内 service 地址对浏览器不可达，必须给公网入口
+  KEYCLOAK_PUBLIC_URL: {{ .Values.identityLayer.keycloak.publicUrl | quote }}
+  KEYCLOAK_WEB_CLIENT_ID: {{ .Values.identityLayer.keycloak.webClientId | quote }}
+  KEYCLOAK_WEB_SCOPE: {{ .Values.identityLayer.keycloak.webScope | quote }}
+  # —— 观测（唯一观测组件，见 3.1）
+  OTEL_EXPORTER_OTLP_ENDPOINT: {{ printf "http://%s-langfuse.%s.svc:%v/api/public/otel" (include "eap.fullname" .) (include "eap.ns.support" .) .Values.observabilityLayer.langfuse.service.port | quote }}
+  # —— 预算（见 4.3 核心能力）
+  BUDGET_PLATFORM_MONTHLY_USD: {{ .Values.gatewayLayer.gateway.budget.platformMonthlyUsd | quote }}
+  BUDGET_PLATFORM_MONTHLY_TOKENS: {{ .Values.gatewayLayer.gateway.budget.platformMonthlyTokens | quote }}

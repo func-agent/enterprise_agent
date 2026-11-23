@@ -1,0 +1,111 @@
+{{/* ===================================================================
+  ChatBI：DB-GPT（见 3.1「DB-GPT：ChatBI，以 MCP Server 暴露」）
+  =================================================================== */}}
+{{- if .Values.chatbiLayer.dbgpt.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "eap.fullname" . }}-db-gpt
+  namespace: {{ include "eap.ns.data" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: db-gpt
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "eap.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: db-gpt
+  ports:
+    - name: mcp
+      port: {{ .Values.chatbiLayer.dbgpt.service.port }}
+      targetPort: mcp
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "eap.fullname" . }}-db-gpt
+  namespace: {{ include "eap.ns.data" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: db-gpt
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "eap.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: db-gpt
+  template:
+    metadata:
+      labels:
+        {{- include "eap.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: db-gpt
+    spec:
+      {{- include "eap.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: db-gpt
+          image: {{ include "eap.image" (dict "root" . "repository" .Values.chatbiLayer.dbgpt.image.repository "tag" .Values.chatbiLayer.dbgpt.image.tag) }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args: ["{{ .Values.chatbiLayer.dbgpt.mcpCommand }}"]
+          ports:
+            - name: mcp
+              containerPort: {{ .Values.chatbiLayer.dbgpt.service.port }}
+          env:
+            - name: TZ
+              value: {{ .Values.global.tz | quote }}
+            # —— 元数据落到平台 PostgreSQL（避免再引入一套存储，见 3.1）
+            - name: DBGPT_DB_HOST
+              value: {{ printf "%s-postgres.%s.svc" (include "eap.fullname" .) (include "eap.ns.support" .) | quote }}
+            - name: DBGPT_DB_PORT
+              value: {{ .Values.supportLayer.postgres.service.port | quote }}
+            - name: DBGPT_DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: postgres-username
+            - name: DBGPT_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: postgres-password
+            - name: DBGPT_DB_NAME
+              value: {{ .Values.supportLayer.postgres.auth.database | quote }}
+          livenessProbe:
+            tcpSocket:
+              port: mcp
+            initialDelaySeconds: 90
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 10
+          readinessProbe:
+            tcpSocket:
+              port: mcp
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 10
+          resources:
+            {{- toYaml .Values.chatbiLayer.dbgpt.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

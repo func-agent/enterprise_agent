@@ -1,0 +1,42 @@
+[
+  {
+    "metric": "销售额",
+    "caliber": "下单口径",
+    "definition": "按下单日期统计订单金额，不含退款、不含税",
+    "table": "orders",
+    "field": "amount",
+    "filter": "status <> 'refunded'"
+  },
+  {
+    "metric": "销售额",
+    "caliber": "开票口径",
+    "definition": "按开票日期统计发票金额，含税",
+    "table": "invoices",
+    "field": "amount",
+    "filter": "status = 'issued'"
+  },
+  {
+    "metric": "销售额",
+    "caliber": "回款口径",
+    "definition": "按到账日期统计实收金额",
+    "table": "payments",
+    "field": "amount",
+    "filter": "1=1"
+  },
+  {
+    "metric": "订单数",
+    "caliber": "下单口径",
+    "definition": "统计订单笔数，不含已退款订单",
+    "table": "orders",
+    "field": "id",
+    "filter": "status <> 'refunded'"
+  },
+  {
+    "metric": "客单价",
+    "caliber": "下单口径",
+    "definition": "销售额（下单口径）/ 订单数（不含退款）",
+    "table": "orders",
+    "field": "derived",
+    "filter": "1=1"
+  }
+]

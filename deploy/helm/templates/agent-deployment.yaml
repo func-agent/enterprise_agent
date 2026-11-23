@@ -1,0 +1,253 @@
+{{/* ===================================================================
+  AgentScope Service（agent-core）+ 本地 MCP Server（mcp-hub）
+  见 3.1「AgentScope Service：多租户注册 / 会话管理 / 分布式协调」
+  =================================================================== */}}
+{{- if .Values.appLayer.agentCore.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "eap.fullname" . }}-agent-core
+  namespace: {{ include "eap.ns.app" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agent-core
+spec:
+  replicas: {{ .Values.appLayer.agentCore.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "eap.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: agent-core
+  template:
+    metadata:
+      labels:
+        {{- include "eap.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: agent-core
+    spec:
+      {{- include "eap.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: agent-core
+          image: {{ include "eap.image" (dict "root" . "repository" .Values.appLayer.agentCore.image.repository "tag" .Values.appLayer.agentCore.image.tag) }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: {{ .Values.appLayer.agentCore.service.port }}
+              protocol: TCP
+          env:
+            {{- include "eap.appEnv" . | nindent 12 }}
+            - name: LOG_LEVEL
+              value: "info"
+            - name: AGENT_PORT
+              value: {{ .Values.appLayer.agentCore.service.port | quote }}
+            - name: AGENT_HOST
+              value: "0.0.0.0"
+            - name: AGENT_DEFAULT_MODEL
+              value: {{ .Values.appLayer.agentCore.defaultModel | quote }}
+            # —— ChatModel 全部指向 agentgateway（见 4.1 关键配置）
+            - name: GATEWAY_OPENAI_BASE_URL
+              value: {{ printf "http://%s-agentgateway.%s.svc:%v/v1" (include "eap.fullname" .) (include "eap.ns.app" .) .Values.gatewayLayer.gateway.service.port | quote }}
+            - name: GATEWAY_API_ROOT
+              value: {{ printf "http://%s-agentgateway.%s.svc:%v" (include "eap.fullname" .) (include "eap.ns.app" .) .Values.gatewayLayer.gateway.service.port | quote }}
+            # —— Toolkit 的 MCP Server 地址全部指向网关 MCP 端点（见 4.1）
+            - name: MCP_SERVERS
+              value: {{ printf "knowledge=http://%s-mcp-hub.%s.svc:%v/mcp,chatbi=http://%s-mcp-hub.%s.svc:%v/mcp,business=http://%s-mcp-hub.%s.svc:%v/mcp" (include "eap.fullname" .) (include "eap.ns.app" .) .Values.gatewayLayer.mcpHub.service.knowledgePort (include "eap.fullname" .) (include "eap.ns.app" .) .Values.gatewayLayer.mcpHub.service.chatbiPort (include "eap.fullname" .) (include "eap.ns.app" .) .Values.gatewayLayer.mcpHub.service.businessPort | quote }}
+            - name: KEYCLOAK_BASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "eap.fullname" . }}-platform-config
+                  key: KEYCLOAK_BASE_URL
+            - name: KEYCLOAK_REALM
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "eap.fullname" . }}-platform-config
+                  key: KEYCLOAK_REALM
+            - name: AUTH_DEV_MODE
+              value: "false"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "eap.fullname" . }}-platform-config
+                  key: OTEL_EXPORTER_OTLP_ENDPOINT
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.appLayer.agentCore.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "eap.fullname" . }}-agent-core
+  namespace: {{ include "eap.ns.app" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agent-core
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "eap.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: agent-core
+  ports:
+    - name: http
+      port: {{ .Values.appLayer.agentCore.service.port }}
+      targetPort: http
+      protocol: TCP
+{{- if .Values.appLayer.agentCore.pdb.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "eap.fullname" . }}-agent-core
+  namespace: {{ include "eap.ns.app" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agent-core
+spec:
+  minAvailable: {{ .Values.appLayer.agentCore.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "eap.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: agent-core
+{{- end }}
+{{- end }}
+
+{{/* —— 本地 MCP Server：文档检索 8091 / ChatBI 8092 / 业务工具 8093 —— */}}
+{{- if .Values.gatewayLayer.mcpHub.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "eap.fullname" . }}-mcp-hub
+  namespace: {{ include "eap.ns.app" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mcp-hub
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "eap.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: mcp-hub
+  template:
+    metadata:
+      labels:
+        {{- include "eap.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: mcp-hub
+    spec:
+      {{- include "eap.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: mcp-hub
+          image: {{ include "eap.image" (dict "root" . "repository" .Values.gatewayLayer.mcpHub.image.repository "tag" .Values.gatewayLayer.mcpHub.image.tag) }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: knowledge
+              containerPort: {{ .Values.gatewayLayer.mcpHub.service.knowledgePort }}
+            - name: chatbi
+              containerPort: {{ .Values.gatewayLayer.mcpHub.service.chatbiPort }}
+            - name: business
+              containerPort: {{ .Values.gatewayLayer.mcpHub.service.businessPort }}
+          env:
+            {{- include "eap.appEnv" . | nindent 12 }}
+            - name: EAP_DATA_DIR
+              value: "/app/data"
+            - name: MCP_KNOWLEDGE_PORT
+              value: {{ .Values.gatewayLayer.mcpHub.service.knowledgePort | quote }}
+            - name: MCP_CHATBI_PORT
+              value: {{ .Values.gatewayLayer.mcpHub.service.chatbiPort | quote }}
+            - name: MCP_BUSINESS_PORT
+              value: {{ .Values.gatewayLayer.mcpHub.service.businessPort | quote }}
+            - name: CHATBI_DB_PATH
+              value: "/app/data/chatbi.db"
+            - name: GATEWAY_API_ROOT
+              value: {{ printf "http://%s-agentgateway.%s.svc:%v" (include "eap.fullname" .) (include "eap.ns.app" .) .Values.gatewayLayer.gateway.service.port | quote }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: knowledge
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: knowledge
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.gatewayLayer.mcpHub.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "eap.fullname" . }}-mcp-hub
+  namespace: {{ include "eap.ns.app" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mcp-hub
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "eap.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: mcp-hub
+  ports:
+    - name: knowledge
+      port: {{ .Values.gatewayLayer.mcpHub.service.knowledgePort }}
+      targetPort: knowledge
+    - name: chatbi
+      port: {{ .Values.gatewayLayer.mcpHub.service.chatbiPort }}
+      targetPort: chatbi
+    - name: business
+      port: {{ .Values.gatewayLayer.mcpHub.service.businessPort }}
+      targetPort: business
+{{- end }}

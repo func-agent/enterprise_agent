@@ -1,0 +1,54 @@
+# =============================================================================
+# RAGFlow v0.22.1 服务配置模板
+#
+# 依据《建设方案》4.2（RAGFlow + Infinity）与 9.4（DOC_ENGINE=infinity）：
+#   · 文档引擎固定为 Infinity（BM25 + 稠密/稀疏向量内核级融合），不再引入 ES
+#   · 因此 es / os 段落保留但不使用，不需要 vm.max_map_count / IK 分词插件 / JVM 堆调优
+#   · Embedding 使用本地 TEI（BAAI/bge-m3），数据不出域
+#
+# 变量由容器环境变量注入（render_envsubst 风格），与 RAGFlow 官方 docker/.env 保持一致。
+# =============================================================================
+ragflow:
+  host: ${RAGFLOW_HOST:-0.0.0.0}
+  http_port: 9380
+admin:
+  host: ${RAGFLOW_HOST:-0.0.0.0}
+  http_port: 9381
+mysql:
+  name: '${MYSQL_DBNAME:-rag_flow}'
+  user: '${MYSQL_USER:-root}'
+  password: '${MYSQL_PASSWORD:-CHANGE_ME_ragflow_mysql_password}'
+  host: '${MYSQL_HOST:-mysql}'
+  port: 3306
+  max_connections: 900
+  stale_timeout: 300
+  max_allowed_packet: ${MYSQL_MAX_PACKET:-1073741824}
+minio:
+  user: '${MINIO_USER:-eapadmin}'
+  password: '${MINIO_PASSWORD:-CHANGE_ME_minio_password}'
+  host: '${MINIO_HOST:-minio}:9000'
+# ES 段落保留占位：DOC_ENGINE=infinity 时不会被使用（见 9.4）
+es:
+  hosts: 'http://${ES_HOST:-es01}:9200'
+  username: '${ES_USER:-elastic}'
+  password: '${ELASTIC_PASSWORD:-CHANGE_ME_es_password}'
+os:
+  hosts: 'http://${OS_HOST:-opensearch01}:9201'
+  username: '${OS_USER:-admin}'
+  password: '${OS_PASSWORD:-CHANGE_ME_os_password}'
+# —— 检索引擎：Infinity（Thrift 客户端端口 23817）
+infinity:
+  uri: '${INFINITY_HOST:-infinity}:23817'
+  db_name: 'default_db'
+redis:
+  db: 1
+  password: '${REDIS_PASSWORD:-CHANGE_ME_redis_password}'
+  host: '${REDIS_HOST:-redis}:6379'
+# —— 任务执行器：用 Redis 做消息队列（与镜像内置默认一致）
+task_executor:
+  message_queue_type: 'redis'
+user_default_llm:
+  default_models:
+    embedding_model:
+      api_key: 'xxx'
+      base_url: 'http://${TEI_HOST:-tei}:80'

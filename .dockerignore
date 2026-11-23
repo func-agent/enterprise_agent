@@ -1,0 +1,17 @@
+.git
+node_modules
+**/node_modules
+dist
+**/dist
+*.tsbuildinfo
+**/*.tsbuildinfo
+data
+.cache
+.env
+.env.*
+!.env.example
+**/__pycache__
+*.py[cod]
+*.log
+deploy/compose/envoy/certs
+企业级 AI Agent 平台建设方案.pdf

@@ -1,0 +1,43 @@
+# 依赖与构建产物
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Python 字节码
+__pycache__/
+*.py[cod]
+
+# 运行时数据
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# 浏览器验收用的本地共享库（从容器借出，不入库）
+.cache/
+
+# 凭证与本地配置
+.env
+.env.local
+.env.*.bak
+
+# 内部参数表（含真实公网地址 / 内网拓扑，属敏感运维信息，不入公开仓库）
+# 模板见 docs/host-handoff.md；本机副本由 scripts/gen-host-params.sh 生成
+docs/internal/
+
+# 出网代理 TLS 解密证书（含私钥，严禁入库）
+# 全新克隆后用 deploy/compose/envoy/generate-certs.sh 重新生成；
+# scripts/start-infra.sh 会在缺证书时自动生成。
+deploy/compose/envoy/certs/*.key
+deploy/compose/envoy/certs/*.crt
+deploy/compose/envoy/certs/*.csr
+deploy/compose/envoy/certs/*.srl
+
+# 日志
+*.log
+npm-debug.log*
+
+# 编辑器
+.DS_Store
+.idea/
+.vscode/

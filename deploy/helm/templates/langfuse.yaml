@@ -1,0 +1,281 @@
+{{/* ===================================================================
+  观测层：Langfuse v3（web + worker）
+  见 3.1「Langfuse（自托管）+ ClickHouse v3：Trace / 成本归因」
+      2.1「单一观测点」：不引入 Prometheus / Grafana / Loki 监控栈
+  =================================================================== */}}
+{{- if .Values.observabilityLayer.langfuse.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "eap.fullname" . }}-langfuse
+  namespace: {{ include "eap.ns.support" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: langfuse
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "eap.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: langfuse
+  ports:
+    - name: http
+      port: {{ .Values.observabilityLayer.langfuse.service.port }}
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "eap.fullname" . }}-langfuse
+  namespace: {{ include "eap.ns.support" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: langfuse
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "eap.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: langfuse
+  template:
+    metadata:
+      labels:
+        {{- include "eap.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: langfuse
+    spec:
+      {{- include "eap.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: langfuse
+          image: {{ include "eap.image" (dict "root" . "repository" .Values.observabilityLayer.langfuse.image.repository "tag" .Values.observabilityLayer.langfuse.image.tag) }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: {{ .Values.observabilityLayer.langfuse.service.port }}
+          env:
+            - name: TZ
+              value: {{ .Values.global.tz | quote }}
+            - name: LANGFUSE_INIT_CLICKHOUSE
+              value: "true"
+            - name: LANGFUSE_CLICKHOUSE_MIGRATION_URL
+              value: {{ printf "http://%s-clickhouse.%s.svc:%v" (include "eap.fullname" .) (include "eap.ns.support" .) .Values.supportLayer.clickhouse.service.httpPort | quote }}
+            - name: LANGFUSE_CLICKHOUSE_URL
+              value: {{ printf "http://%s-clickhouse.%s.svc:%v" (include "eap.fullname" .) (include "eap.ns.support" .) .Values.supportLayer.clickhouse.service.httpPort | quote }}
+            - name: LANGFUSE_CLICKHOUSE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: clickhouse-user
+            - name: LANGFUSE_CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: clickhouse-password
+            - name: LANGFUSE_CLICKHOUSE_CLUSTER_ENABLED
+              value: "false"
+            - name: LANGFUSE_DATABASE_HOST
+              value: {{ printf "%s-postgres" (include "eap.fullname" .) | quote }}
+            - name: LANGFUSE_DATABASE_PORT
+              value: {{ .Values.supportLayer.postgres.service.port | quote }}
+            - name: LANGFUSE_DATABASE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: postgres-username
+            - name: LANGFUSE_DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: postgres-password
+            - name: LANGFUSE_DATABASE_DATABASE
+              value: "langfuse"
+            - name: LANGFUSE_REDIS_HOST
+              value: {{ printf "%s-redis" (include "eap.fullname" .) | quote }}
+            - name: LANGFUSE_REDIS_PORT
+              value: {{ .Values.supportLayer.redis.service.port | quote }}
+            - name: LANGFUSE_REDIS_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: redis-password
+            - name: LANGFUSE_REDIS_TLS_ENABLED
+              value: "false"
+            - name: LANGFUSE_SALT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: langfuse-salt
+            - name: LANGFUSE_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: langfuse-encryption-key
+            - name: NEXTAUTH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: nextauth-secret
+            # —— 对象存储复用平台 MinIO
+            - name: LANGFUSE_S3_EVENT_UPLOAD_ENABLED
+              value: "true"
+            - name: LANGFUSE_S3_EVENT_UPLOAD_BUCKET
+              value: "langfuse"
+            - name: LANGFUSE_S3_EVENT_UPLOAD_REGION
+              value: "us-east-1"
+            - name: LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT
+              value: {{ printf "http://%s-minio.%s.svc:%v" (include "eap.fullname" .) (include "eap.ns.support" .) .Values.supportLayer.minio.service.apiPort | quote }}
+            - name: LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: minio-root-user
+            - name: LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: minio-root-password
+            - name: LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE
+              value: "true"
+            - name: LANGFUSE_S3_EVENT_UPLOAD_PREFIX
+              value: "events/"
+            - name: TELEMETRY_ENABLED
+              value: "false"
+          livenessProbe:
+            httpGet:
+              path: /api/public/health
+              port: http
+            initialDelaySeconds: 90
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 10
+          readinessProbe:
+            httpGet:
+              path: /api/public/health
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 10
+          resources:
+            {{- toYaml .Values.observabilityLayer.langfuse.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+{{- if .Values.observabilityLayer.langfuse.worker.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "eap.fullname" . }}-langfuse-worker
+  namespace: {{ include "eap.ns.support" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: langfuse-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "eap.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: langfuse-worker
+  template:
+    metadata:
+      labels:
+        {{- include "eap.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: langfuse-worker
+    spec:
+      {{- include "eap.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: worker
+          image: {{ include "eap.image" (dict "root" . "repository" .Values.observabilityLayer.langfuse.worker.image.repository "tag" .Values.observabilityLayer.langfuse.worker.image.tag) }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: TZ
+              value: {{ .Values.global.tz | quote }}
+            - name: LANGFUSE_INIT_CLICKHOUSE
+              value: "false"
+            - name: LANGFUSE_CLICKHOUSE_URL
+              value: {{ printf "http://%s-clickhouse.%s.svc:%v" (include "eap.fullname" .) (include "eap.ns.support" .) .Values.supportLayer.clickhouse.service.httpPort | quote }}
+            - name: LANGFUSE_CLICKHOUSE_MIGRATION_URL
+              value: {{ printf "http://%s-clickhouse.%s.svc:%v" (include "eap.fullname" .) (include "eap.ns.support" .) .Values.supportLayer.clickhouse.service.httpPort | quote }}
+            - name: LANGFUSE_CLICKHOUSE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: clickhouse-user
+            - name: LANGFUSE_CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: clickhouse-password
+            - name: LANGFUSE_CLICKHOUSE_CLUSTER_ENABLED
+              value: "false"
+            - name: LANGFUSE_DATABASE_HOST
+              value: {{ printf "%s-postgres" (include "eap.fullname" .) | quote }}
+            - name: LANGFUSE_DATABASE_PORT
+              value: {{ .Values.supportLayer.postgres.service.port | quote }}
+            - name: LANGFUSE_DATABASE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: postgres-username
+            - name: LANGFUSE_DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: postgres-password
+            - name: LANGFUSE_DATABASE_DATABASE
+              value: "langfuse"
+            - name: LANGFUSE_REDIS_HOST
+              value: {{ printf "%s-redis" (include "eap.fullname" .) | quote }}
+            - name: LANGFUSE_REDIS_PORT
+              value: {{ .Values.supportLayer.redis.service.port | quote }}
+            - name: LANGFUSE_REDIS_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: redis-password
+            - name: LANGFUSE_SALT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: langfuse-salt
+            - name: LANGFUSE_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: langfuse-encryption-key
+            - name: NEXTAUTH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: nextauth-secret
+            - name: TELEMETRY_ENABLED
+              value: "false"
+          resources:
+            requests:
+              cpu: 250m
+              memory: 1Gi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- end }}
+{{- end }}

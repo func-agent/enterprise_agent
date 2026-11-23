@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>已退出登录 · RAGFlow</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: #0b0d12;
+    background-image:
+      radial-gradient(1200px 600px at 12% -10%, rgba(59,130,246,.18), transparent 60%),
+      radial-gradient(900px 500px at 88% 110%, rgba(16,185,129,.14), transparent 60%);
+    color: #e5e7eb;
+    font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  .card {
+    width: min(460px, calc(100vw - 48px));
+    padding: 40px 36px 28px;
+    background: rgba(17, 20, 28, .88);
+    border: 1px solid rgba(148,163,184,.18);
+    border-radius: 16px;
+    box-shadow: 0 24px 60px rgba(0,0,0,.45);
+    text-align: center;
+  }
+  .brand { font-size: 20px; font-weight: 700; letter-spacing: .3px; margin-bottom: 26px; }
+  .brand span { color: #60a5fa; }
+  h1 { margin: 0 0 12px; font-size: 19px; font-weight: 600; }
+  p { margin: 0 0 10px; font-size: 13.5px; line-height: 1.7; color: #9ca3af; }
+  .check {
+    width: 46px; height: 46px; margin: 0 auto 20px; border-radius: 50%;
+    border: 2px solid rgba(16,185,129,.35); color: #34d399;
+    display: flex; align-items: center; justify-content: center; font-size: 22px;
+    background: rgba(16,185,129,.08);
+  }
+  .actions { margin-top: 26px; padding-top: 20px; border-top: 1px solid rgba(148,163,184,.14); }
+  .btn {
+    display: block; padding: 11px 16px; border-radius: 9px; text-decoration: none;
+    font-size: 14px; font-weight: 600; border: 1px solid transparent; cursor: pointer;
+  }
+  .btn-primary { background: #2563eb; color: #fff; }
+  .btn-primary:hover { background: #1d4ed8; }
+  .btn-ghost { margin-top: 10px; background: transparent; color: #9ca3af; border-color: rgba(148,163,184,.25); }
+  .btn-ghost:hover { color: #e5e7eb; border-color: rgba(148,163,184,.45); }
+  .note { margin-top: 18px; font-size: 12px; color: #6b7280; line-height: 1.7; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="brand">RAG<span>Flow</span></div>
+    <div class="check">✓</div>
+    <h1>已退出登录</h1>
+    <p id="session-summary">RAGFlow 会话与企业账号的单点登录会话都已结束。</p>
+    <p id="login-summary">再次登录需要重新输入企业账号口令。</p>
+    <div class="actions">
+      <a class="btn btn-primary" id="sso-login-link" href="/login">重新登录</a>
+      <a class="btn btn-ghost" id="local-login-link" href="/login?local=1">改用本地账号登录</a>
+      <div class="note" id="console-note">Keycloak 单点登录已结束。已打开的平台控制台可能继续使用现有令牌直至过期，下次重新认证需要登录。</div>
+    </div>
+  </div>
+  <script>
+    if (new URLSearchParams(window.location.search).get('local') === '1') {
+      document.getElementById('session-summary').textContent = 'RAGFlow 本地账号会话已结束。';
+      document.getElementById('login-summary').textContent = '本次仅退出本地账号，未更改企业账号的单点登录会话。';
+      document.getElementById('sso-login-link').textContent = '使用企业账号登录';
+      document.getElementById('local-login-link').textContent = '重新使用本地账号登录';
+      document.getElementById('console-note').textContent = '本地账号退出不影响平台控制台和企业账号 SSO 登录态。';
+    }
+  </script>
+</body>
+</html>

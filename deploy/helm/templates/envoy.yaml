@@ -1,0 +1,355 @@
+{{/* ===================================================================
+  出网代理：Envoy（唯一出网组件）
+  见 8.3 出网安全（SNI 域名白名单 + TLS 解密审计）
+      9.3 网络要求（业务组件禁止直连商业 API）
+  白名单按 values.securityLayer.envoy.allowedHosts 渲染
+  =================================================================== */}}
+{{- if .Values.securityLayer.envoy.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "eap.fullname" . }}-envoy
+  namespace: {{ include "eap.ns.app" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: envoy
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "eap.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: envoy
+  ports:
+    - name: http
+      port: {{ .Values.securityLayer.envoy.service.httpPort }}
+      targetPort: http
+    - name: https
+      port: {{ .Values.securityLayer.envoy.service.httpsPort }}
+      targetPort: https
+    - name: admin
+      port: {{ .Values.securityLayer.envoy.service.adminPort }}
+      targetPort: admin
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "eap.fullname" . }}-envoy-config
+  namespace: {{ include "eap.ns.app" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: envoy
+data:
+  envoy.yaml: |
+    admin:
+      address:
+        socket_address:
+          address: 0.0.0.0
+          port_value: {{ .Values.securityLayer.envoy.service.adminPort }}
+    static_resources:
+      listeners:
+        # —— 15000 HTTP 正向代理（按 :authority 白名单过滤）
+        - name: egress_http_proxy
+          address:
+            socket_address:
+              address: 0.0.0.0
+              port_value: {{ .Values.securityLayer.envoy.service.httpPort }}
+          filter_chains:
+            - name: egress_http_chain
+              filters:
+                - name: envoy.filters.network.http_connection_manager
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                    stat_prefix: egress_http
+                    codec_type: AUTO
+                    use_remote_address: true
+                    upgrade_configs:
+                      - upgrade_type: CONNECT
+                    access_log:
+                      - name: envoy.access_loggers.stdout
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                          log_format:
+                            text_format_source:
+                              inline_string: "[egress-http] method=%REQ(:METHOD)% authority=%REQ(:AUTHORITY)% upstream=%UPSTREAM_HOST% response=%RESPONSE_CODE% duration_ms=%DURATION%\n"
+                    route_config:
+                      name: egress_http_routes
+                      virtual_hosts:
+                        {{- range $host := .Values.securityLayer.envoy.allowedHosts }}
+                        - name: allow_{{ $host | replace "." "_" | replace "-" "_" }}
+                          domains:
+                            - {{ $host | quote }}
+                            - "{{ $host }}:*"
+                          routes:
+                            - match:
+                                connect_matcher: {}
+                                headers:
+                                  - name: ":authority"
+                                    string_match:
+                                      safe_regex:
+                                        regex: '^{{ $host | replace "." "\\." }}(\:443)?$'
+                              route:
+                                cluster: egress_connect_{{ $host | replace "." "_" | replace "-" "_" }}
+                                timeout: 120s
+                                upgrade_configs:
+                                  - upgrade_type: CONNECT
+                                    connect_config: {}
+                            - match:
+                                prefix: "/"
+                              route:
+                                cluster: egress_http_{{ $host | replace "." "_" | replace "-" "_" }}
+                                timeout: 120s
+                        {{- end }}
+                        - name: default_deny
+                          domains:
+                            - "*"
+                          routes:
+                            - match:
+                                connect_matcher: {}
+                              direct_response:
+                                status: 403
+                                body:
+                                  inline_string: "EAP egress denied: host not in egress allowlist\n"
+                            - match:
+                                prefix: "/"
+                              direct_response:
+                                status: 403
+                                body:
+                                  inline_string: "EAP egress denied: host not in egress allowlist\n"
+                    http_filters:
+                      - name: envoy.filters.http.router
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+        # —— 15001 HTTPS 代理（TLS inspector + SNI 白名单 + 解密审计）
+        - name: egress_https_proxy
+          address:
+            socket_address:
+              address: 0.0.0.0
+              port_value: {{ .Values.securityLayer.envoy.service.httpsPort }}
+          listener_filters:
+            - name: envoy.filters.listener.tls_inspector
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.listener.tls_inspector.v3.TlsInspector
+          filter_chains:
+            # —— 默认拒绝链
+            - name: default_deny
+              transport_socket:
+                name: envoy.transport_sockets.tls
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+                  common_tls_context:
+                    tls_certificates:
+                      - certificate_chain:
+                          filename: /etc/envoy/certs/{{ .Values.securityLayer.envoy.tls.certFile }}
+                        private_key:
+                          filename: /etc/envoy/certs/{{ .Values.securityLayer.envoy.tls.keyFile }}
+              filters:
+                - name: envoy.filters.network.http_connection_manager
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                    stat_prefix: egress_denied
+                    codec_type: AUTO
+                    use_remote_address: true
+                    access_log:
+                      - name: envoy.access_loggers.stdout
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                          log_format:
+                            text_format_source:
+                              inline_string: "[egress-denied] sni=%REQUESTED_SERVER_NAME% authority=%REQ(:AUTHORITY)% response=403\n"
+                    route_config:
+                      name: egress_denied_routes
+                      virtual_hosts:
+                        - name: default_deny
+                          domains:
+                            - "*"
+                          routes:
+                            - match:
+                                prefix: "/"
+                              direct_response:
+                                status: 403
+                                body:
+                                  inline_string: "EAP egress denied: SNI not in egress allowlist\n"
+                    http_filters:
+                      - name: envoy.filters.http.router
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+            {{- range $host := .Values.securityLayer.envoy.allowedHosts }}
+            # —— 白名单域名过滤链
+            - name: allow_{{ $host | replace "." "_" | replace "-" "_" }}
+              filter_chain_match:
+                server_names:
+                  - {{ $host | quote }}
+              transport_socket:
+                name: envoy.transport_sockets.tls
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+                  common_tls_context:
+                    tls_certificates:
+                      - certificate_chain:
+                          filename: /etc/envoy/certs/{{ $.Values.securityLayer.envoy.tls.certFile }}
+                        private_key:
+                          filename: /etc/envoy/certs/{{ $.Values.securityLayer.envoy.tls.keyFile }}
+              filters:
+                - name: envoy.filters.network.http_connection_manager
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                    stat_prefix: egress_https
+                    codec_type: AUTO
+                    use_remote_address: true
+                    access_log:
+                      - name: envoy.access_loggers.stdout
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                          log_format:
+                            text_format_source:
+                              inline_string: "[egress-https] sni=%REQUESTED_SERVER_NAME% authority=%REQ(:AUTHORITY)% upstream=%UPSTREAM_HOST% response=%RESPONSE_CODE% duration_ms=%DURATION%\n"
+                    route_config:
+                      name: egress_https_routes
+                      virtual_hosts:
+                        - name: allowlist
+                          domains:
+                            - "*"
+                          routes:
+                            - match:
+                                prefix: "/"
+                              route:
+                                cluster: egress_tls_{{ $host | replace "." "_" | replace "-" "_" }}
+                                timeout: 120s
+                    http_filters:
+                      - name: envoy.filters.http.router
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+            {{- end }}
+      clusters:
+        {{- range $host := .Values.securityLayer.envoy.allowedHosts }}
+        - name: egress_http_{{ $host | replace "." "_" | replace "-" "_" }}
+          type: STRICT_DNS
+          dns_lookup_family: V4_ONLY
+          connect_timeout: 5s
+          lb_policy: ROUND_ROBIN
+          load_assignment:
+            cluster_name: egress_http_{{ $host | replace "." "_" | replace "-" "_" }}
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: {{ $host | quote }}
+                          port_value: 80
+          transport_socket:
+            name: envoy.transport_sockets.raw_buffer
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.raw_buffer.v3.RawBuffer
+        - name: egress_connect_{{ $host | replace "." "_" | replace "-" "_" }}
+          type: STRICT_DNS
+          dns_lookup_family: V4_ONLY
+          connect_timeout: 5s
+          lb_policy: ROUND_ROBIN
+          load_assignment:
+            cluster_name: egress_connect_{{ $host | replace "." "_" | replace "-" "_" }}
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: {{ $host | quote }}
+                          port_value: 443
+          transport_socket:
+            name: envoy.transport_sockets.raw_buffer
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.raw_buffer.v3.RawBuffer
+        - name: egress_tls_{{ $host | replace "." "_" | replace "-" "_" }}
+          type: STRICT_DNS
+          dns_lookup_family: V4_ONLY
+          connect_timeout: 5s
+          lb_policy: ROUND_ROBIN
+          load_assignment:
+            cluster_name: egress_tls_{{ $host | replace "." "_" | replace "-" "_" }}
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: {{ $host | quote }}
+                          port_value: 443
+          transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+              sni: {{ $host | quote }}
+              common_tls_context:
+                validation_context:
+                  trusted_ca:
+                    filename: /etc/ssl/certs/ca-certificates.crt
+        {{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "eap.fullname" . }}-envoy
+  namespace: {{ include "eap.ns.app" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: envoy
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      {{- include "eap.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: envoy
+  template:
+    metadata:
+      labels:
+        {{- include "eap.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: envoy
+    spec:
+      {{- include "eap.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: envoy
+          image: {{ include "eap.image" (dict "root" . "repository" .Values.securityLayer.envoy.image.repository "tag" .Values.securityLayer.envoy.image.tag) }}
+          imagePullPolicy: IfNotPresent
+          args: ["-c", "/etc/envoy/envoy.yaml", "--log-level", "info"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.securityLayer.envoy.service.httpPort }}
+            - name: https
+              containerPort: {{ .Values.securityLayer.envoy.service.httpsPort }}
+            - name: admin
+              containerPort: {{ .Values.securityLayer.envoy.service.adminPort }}
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: admin
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: admin
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.securityLayer.envoy.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/envoy/envoy.yaml
+              subPath: envoy.yaml
+              readOnly: true
+            - name: certs
+              mountPath: /etc/envoy/certs
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "eap.fullname" . }}-envoy-config
+        - name: certs
+          secret:
+            secretName: {{ .Values.securityLayer.envoy.tls.existingSecret | default (printf "%s-envoy-tls" (include "eap.fullname" .)) }}
+{{- end }}

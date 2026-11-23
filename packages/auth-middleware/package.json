@@ -1,0 +1,17 @@
+{
+  "name": "@eap/auth-middleware",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@eap/platform-core": "1.0.0",
+    "express": "^4.21.2",
+    "jose": "^5.9.6"
+  }
+}

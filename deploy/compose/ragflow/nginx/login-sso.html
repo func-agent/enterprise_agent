@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>正在登录企业账号 · RAGFlow</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: #0b0d12;
+    background-image:
+      radial-gradient(1200px 600px at 12% -10%, rgba(59,130,246,.18), transparent 60%),
+      radial-gradient(900px 500px at 88% 110%, rgba(16,185,129,.14), transparent 60%);
+    color: #e5e7eb;
+    font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  .card {
+    width: min(460px, calc(100vw - 48px));
+    padding: 40px 36px 28px;
+    background: rgba(17, 20, 28, .88);
+    border: 1px solid rgba(148,163,184,.18);
+    border-radius: 16px;
+    box-shadow: 0 24px 60px rgba(0,0,0,.45);
+    text-align: center;
+  }
+  .brand { font-size: 20px; font-weight: 700; letter-spacing: .3px; margin-bottom: 26px; }
+  .brand span { color: #60a5fa; }
+  h1 { margin: 0 0 12px; font-size: 19px; font-weight: 600; }
+  p { margin: 0 0 10px; font-size: 13.5px; line-height: 1.7; color: #9ca3af; }
+  .spinner {
+    width: 34px; height: 34px; margin: 0 auto 22px;
+    border: 3px solid rgba(96,165,250,.22); border-top-color: #60a5fa;
+    border-radius: 50%; animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .actions { margin-top: 26px; padding-top: 20px; border-top: 1px solid rgba(148,163,184,.14); }
+  .btn {
+    display: block; padding: 11px 16px; border-radius: 9px; text-decoration: none;
+    font-size: 14px; font-weight: 600; border: 1px solid transparent; cursor: pointer;
+  }
+  .btn-primary { background: #2563eb; color: #fff; }
+  .btn-primary:hover { background: #1d4ed8; }
+  .btn-ghost { margin-top: 10px; background: transparent; color: #9ca3af; border-color: rgba(148,163,184,.25); }
+  .btn-ghost:hover { color: #e5e7eb; border-color: rgba(148,163,184,.45); }
+  .note { margin-top: 18px; font-size: 12px; color: #6b7280; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="brand">RAG<span>Flow</span></div>
+    <div class="spinner"></div>
+    <h1>正在跳转到企业账号登录…</h1>
+    <p>将由 Keycloak 完成身份认证，成功后自动创建或登录对应的 RAGFlow 账号，
+       不需要单独记 RAGFlow 的口令。</p>
+    <div class="actions">
+      <a class="btn btn-primary" href="/v1/user/login/keycloak">立即继续登录</a>
+      <a class="btn btn-ghost" href="/login?local=1">改用本地账号登录</a>
+      <div class="note">本地账号仅用于应急（普通权限），自注册已关闭。</div>
+    </div>
+  </div>
+  <script>
+    // 渠道名必须与 RAGFlow 的 oauth 配置一致 —— 即编排里的 RAGFLOW_SSO_CHANNEL
+    // （deploy/compose/docker-compose.heavy.yml，默认 keycloak）。
+    // 改渠道名时，这里的 /v1/user/login/<channel> 与
+    // deploy/compose/ragflow/eap-entrypoint.sh 的校验要一起改，
+    // 否则容器启动时会因「拦截页渠道与实际渠道不一致」直接退出。
+    (function () {
+      try {
+        location.replace('/v1/user/login/keycloak');
+      } catch (e) { /* 无 JS 时用上面的「立即继续登录」链接 */ }
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,562 @@
+/**
+ * 控制台设计系统 —— Tailwind 4 + shadcn 风格设计令牌（浅色主题 / 企业深蓝主色）。
+ *
+ * 来源与许可：
+ *   本文件的令牌结构、@theme inline 映射与基础层写法移植自
+ *   https://github.com/Ken-LK/agentscope-agui-scaffold （frontend/src/styles.css）
+ *   许可：Apache License 2.0。移植部分保留上游版权与许可声明：
+ *   Copyright 2024-2025 Ken-LK and the agentscope-agui-scaffold contributors.
+ *   Licensed under the Apache License, Version 2.0 (the "License");
+ *   you may not use this file except in compliance with the License.
+ *   You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * 本地改造点：
+ *   1. 主色由上游的青绿（oklch(0.34 0.067 188)）改为企业深蓝 oklch(0.48 0.16 255)，
+ *      --ring 与之同步；accent / sidebar-accent / chart-1 一并切到蓝色系以保持整体协调。
+ *   2. 中性色沿用上游的微冷灰；--background 改为中性偏冷的白，避免暖黄底与深蓝主色冲突。
+ *   3. 上游未提供 .dark 变量，这里补齐暗色令牌；默认浅色，
+ *      ThemeToggle 用图标切换浅色、深色，并兼容已有跟随系统设置。
+ *   4. @source 显式声明扫描范围：控制台源码位于 src/ 下，与上游的 app/ 结构不同。
+ */
+
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/* 扫描范围：控制台前端全部源码目录 */
+@source "./components/**/*.{ts,tsx}";
+@source "./runtime/**/*.{ts,tsx}";
+@source "./lib/**/*.{ts,tsx}";
+@source "./pages/**/*.{ts,tsx}";
+@source "./*.tsx";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+}
+
+:root {
+  --radius: 0.625rem;
+
+  /* —— 表面与文字（中性工作区，企业蓝用于关键操作） —— */
+  --background: oklch(0.989 0.005 250);
+  --foreground: oklch(0.235 0.045 258);
+  --card: oklch(0.998 0.004 250);
+  --card-foreground: oklch(0.235 0.045 258);
+  --popover: oklch(0.998 0.004 250);
+  --popover-foreground: oklch(0.235 0.045 258);
+
+  /* —— 主色：企业深蓝 —— */
+  --primary: oklch(0.455 0.195 258);
+  --primary-foreground: oklch(0.985 0.008 250);
+
+  /* —— 次级 / 弱化 —— */
+  --secondary: oklch(0.94 0.03 250);
+  --secondary-foreground: oklch(0.3 0.075 258);
+  --muted: oklch(0.965 0.012 248);
+  --muted-foreground: oklch(0.475 0.055 256);
+  --accent: oklch(0.945 0.032 252);
+  --accent-foreground: oklch(0.315 0.115 257);
+
+  /* —— 语义色 —— */
+  --destructive: oklch(0.545 0.225 26);
+  --border: oklch(0.91 0.018 248);
+  --input: oklch(0.91 0.018 248);
+  --ring: oklch(0.455 0.195 258);
+
+  /* —— 图表配色 —— */
+  --chart-1: oklch(0.455 0.195 258);
+  --chart-2: oklch(0.58 0.115 225);
+  --chart-3: oklch(0.6 0.13 195);
+  --chart-4: oklch(0.7 0.14 150);
+  --chart-5: oklch(0.6 0.145 315);
+
+  /* —— 侧边栏 —— */
+  --sidebar: oklch(0.974 0.012 247);
+  --sidebar-foreground: oklch(0.235 0.045 258);
+  --sidebar-primary: oklch(0.455 0.195 258);
+  --sidebar-primary-foreground: oklch(0.985 0.008 250);
+  --sidebar-accent: oklch(0.945 0.032 252);
+  --sidebar-accent-foreground: oklch(0.315 0.115 257);
+  --sidebar-border: oklch(0.878 0.032 248);
+  --sidebar-ring: oklch(0.455 0.195 258);
+}
+
+/* 暗色令牌由 ThemeToggle 在根节点切换；index.html 会在加载 React 前恢复选择。 */
+.dark {
+  --background: oklch(0.185 0.032 258);
+  --foreground: oklch(0.96 0.015 250);
+  --card: oklch(0.225 0.036 258);
+  --card-foreground: oklch(0.96 0.015 250);
+  --popover: oklch(0.225 0.036 258);
+  --popover-foreground: oklch(0.96 0.015 250);
+
+  --primary: oklch(0.65 0.17 255);
+  --primary-foreground: oklch(0.16 0.03 258);
+
+  --secondary: oklch(0.28 0.036 258);
+  --secondary-foreground: oklch(0.96 0.015 250);
+  --muted: oklch(0.275 0.034 258);
+  --muted-foreground: oklch(0.72 0.04 252);
+  --accent: oklch(0.31 0.075 256);
+  --accent-foreground: oklch(0.93 0.025 250);
+
+  --destructive: oklch(0.62 0.2 25);
+  --border: oklch(1 0 0 / 14%);
+  --input: oklch(1 0 0 / 18%);
+  --ring: oklch(0.65 0.17 255);
+
+  --chart-1: oklch(0.65 0.17 255);
+  --chart-2: oklch(0.7 0.12 225);
+  --chart-3: oklch(0.68 0.12 195);
+  --chart-4: oklch(0.75 0.13 150);
+  --chart-5: oklch(0.72 0.13 315);
+
+  --sidebar: oklch(0.21 0.034 258);
+  --sidebar-foreground: oklch(0.96 0.015 250);
+  --sidebar-primary: oklch(0.65 0.17 255);
+  --sidebar-primary-foreground: oklch(0.16 0.03 258);
+  --sidebar-accent: oklch(0.31 0.075 256);
+  --sidebar-accent-foreground: oklch(0.93 0.025 250);
+  --sidebar-border: oklch(1 0 0 / 14%);
+  --sidebar-ring: oklch(0.65 0.17 255);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  font-family:
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    "PingFang SC",
+    "Microsoft YaHei",
+    sans-serif;
+  letter-spacing: 0;
+}
+
+/* 表单控件（button / textarea / input）继承字体字号的行为，
+ * 由 Tailwind v4 的 preflight 在 @layer base 内提供
+ * （button,input,select,optgroup,textarea{font:inherit}）。
+ * 此前这里额外写了一份**未分层**副本，而未分层样式的层叠优先级高于所有
+ * @layer，会把 @layer utilities 里的字号 / 字重工具类一并压掉，
+ * 导致按钮上的 text-xs / text-sm / font-medium 全部失效（实测恒为 16px）。
+ * 因此不再重复声明：继承行为交给 preflight，工具类才能正常覆盖。 */
+
+/*
+ * 滚动条 —— 原生滚动条默认是系统灰，会在一片蓝里格外扎眼。
+ *
+ * 全部走设计令牌（var(--*)），因此：
+ *   · 改令牌即改滚动条，不写死任何颜色值；
+ *   · 切 .dark 时自动跟随，不需要另写一套深色规则。
+ *
+ * 标准属性给 Firefox（scrollbar-color），::-webkit-* 给 Chromium / Safari。
+ * 滑块用 color-mix 从 --primary 与 --muted 调出来，避免整条滚动条过重。
+ */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklab, var(--primary) 45%, var(--muted)) var(--muted);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--muted);
+}
+
+::-webkit-scrollbar-thumb {
+  background: color-mix(in oklab, var(--primary) 45%, var(--muted));
+  border: 2px solid var(--muted);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in oklab, var(--primary) 72%, var(--muted));
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/*
+ * 管理页面的语义化类层。
+ *
+ * 平台有 5 个数据密集型管理页签（工具目录 / 模型与路由 / 预算看板 / 审计与 Trace /
+ * 审批中心）。这些页面的信息架构是按「表格 + 详情 + 统计卡」组织的，
+ * 重写结构收益不大、回归风险高，因此保留原有语义 class，
+ * 但把外观**全部换成新设计系统的令牌**（企业深蓝主色、圆角卡片、细分隔线）。
+ * 对话页与登录页则直接使用 Tailwind 工具类。
+ */
+@layer components {
+  /* —— 页面骨架 —— */
+  .page {
+    @apply mx-auto w-full max-w-[90rem] px-4 py-5 sm:px-6 lg:px-8;
+  }
+
+  .page-head {
+    @apply mb-5 flex flex-wrap items-start justify-between gap-4;
+  }
+
+  .page-title {
+    @apply text-xl font-semibold tracking-tight;
+  }
+
+  .page-subtitle {
+    @apply text-muted-foreground mt-1 text-sm;
+  }
+
+  .page-actions {
+    @apply flex flex-wrap items-center gap-2;
+  }
+
+  .mb {
+    @apply mb-4;
+  }
+
+  /* —— 按钮 —— */
+  .btn {
+    @apply inline-flex cursor-pointer items-center justify-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium whitespace-nowrap transition-colors disabled:pointer-events-none disabled:opacity-50;
+  }
+
+  .btn-primary {
+    @apply bg-primary text-primary-foreground hover:bg-primary/90;
+  }
+
+  .btn-ghost {
+    @apply hover:bg-accent hover:text-accent-foreground;
+  }
+
+  .btn-danger {
+    @apply bg-destructive text-white hover:bg-destructive/90;
+  }
+
+  .btn-success {
+    @apply bg-emerald-600 text-white hover:bg-emerald-700;
+  }
+
+  .btn-sm {
+    @apply px-2.5 py-1 text-xs;
+  }
+
+  /* —— 分段切换 —— */
+  .seg {
+    @apply bg-muted inline-flex rounded-lg p-0.5;
+  }
+
+  .seg-item {
+    @apply text-muted-foreground hover:text-foreground cursor-pointer rounded-md px-3 py-1.5 text-xs font-medium transition-colors;
+  }
+
+  .seg-item-active {
+    @apply bg-background text-foreground shadow-sm;
+  }
+
+  /* —— 表格 —— */
+  .table-wrap {
+    @apply w-full overflow-x-auto;
+  }
+
+  .table {
+    @apply w-full border-collapse text-sm;
+  }
+
+  .table th {
+    @apply text-muted-foreground border-b px-3 py-2 text-left text-xs font-medium whitespace-nowrap;
+  }
+
+  .table td {
+    @apply border-border/60 border-b px-3 py-2 align-top;
+  }
+
+  .table tbody tr:last-child td {
+    @apply border-b-0;
+  }
+
+  .table-audit td {
+    @apply text-xs;
+  }
+
+  .td-nowrap {
+    @apply whitespace-nowrap;
+  }
+
+  .td-desc {
+    @apply text-muted-foreground max-w-md text-xs;
+  }
+
+  .td-sub {
+    @apply text-muted-foreground block text-xs;
+  }
+
+  .td-subject {
+    @apply flex flex-col;
+  }
+
+  .td-reason {
+    @apply text-muted-foreground max-w-xs truncate text-xs;
+  }
+
+  .td-usage {
+    @apply min-w-40;
+  }
+
+  .row-clickable {
+    @apply cursor-pointer transition-colors hover:bg-accent/40;
+  }
+
+  .row-expanded {
+    @apply bg-accent/40;
+  }
+
+  .row-detail {
+    @apply bg-muted/40;
+  }
+
+  /* —— 统计卡 —— */
+  .stat-row {
+    @apply mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4;
+  }
+
+  .stat-card {
+    @apply border-border bg-card flex flex-col gap-1 rounded-xl border p-4 shadow-sm;
+  }
+
+  .stat-label {
+    @apply text-muted-foreground text-xs;
+  }
+
+  .stat-value {
+    @apply text-2xl font-semibold tabular-nums;
+  }
+
+  /* —— 代码 / 标签 —— */
+  .code-name {
+    @apply bg-muted text-foreground rounded px-1.5 py-0.5 font-mono text-xs;
+  }
+
+  .chip {
+    @apply border-border bg-muted text-muted-foreground inline-flex items-center rounded-full border px-2 py-0.5 text-xs;
+  }
+
+  .json-block {
+    @apply bg-muted/60 text-foreground overflow-x-auto rounded-lg border p-3 font-mono text-xs leading-relaxed;
+  }
+
+  .json-block-compact {
+    @apply max-h-32;
+  }
+
+  /* —— 详情网格 —— */
+  .detail-grid {
+    @apply grid gap-x-6 gap-y-2 sm:grid-cols-2;
+  }
+
+  .detail-label {
+    @apply text-muted-foreground mb-0.5 block text-xs;
+  }
+
+  /* —— 表单 —— */
+  .field {
+    @apply mb-3 block;
+  }
+
+  .field-label {
+    @apply text-muted-foreground mb-1 block text-xs font-medium;
+  }
+
+  .inline-error {
+    /* 校验错误会一次列出多个问题（每行一条）—— 必须保留换行 */
+    @apply border-destructive/30 bg-destructive/5 text-destructive mb-4 whitespace-pre-line rounded-lg border px-3 py-2 text-sm;
+  }
+
+  /* —— MCP Server 健康 —— */
+  .health-grid {
+    @apply grid gap-3 sm:grid-cols-2 lg:grid-cols-3;
+  }
+
+  .health-card {
+    @apply border-border bg-background flex flex-wrap items-center gap-2 rounded-lg border p-3;
+  }
+
+  .health-name {
+    @apply font-mono text-sm font-semibold;
+  }
+
+  .health-meta {
+    @apply text-muted-foreground text-xs;
+  }
+
+  .health-error {
+    @apply text-destructive w-full text-xs;
+  }
+
+  .panel-title-row {
+    @apply flex flex-wrap items-center gap-2;
+  }
+
+  /* —— 虚拟模型 —— */
+  .model-list {
+    @apply flex flex-col gap-2;
+  }
+
+  .model-card {
+    @apply border-border bg-card rounded-xl border shadow-sm;
+  }
+
+  .model-card-open {
+    @apply ring-primary/20 ring-2;
+  }
+
+  .model-head {
+    @apply hover:bg-accent/40 flex w-full cursor-pointer flex-wrap items-center gap-3 px-4 py-3 text-left transition-colors;
+  }
+
+  .model-caret {
+    @apply text-muted-foreground text-xs;
+  }
+
+  .model-name {
+    @apply font-mono text-sm font-semibold;
+  }
+
+  .model-desc {
+    @apply text-muted-foreground min-w-0 flex-1 truncate text-xs;
+  }
+
+  .model-count {
+    @apply text-muted-foreground text-xs;
+  }
+
+  .model-body {
+    @apply border-border space-y-3 border-t px-4 py-3;
+  }
+
+  .model-scenarios {
+    @apply flex flex-wrap items-center gap-2;
+  }
+
+  .model-label {
+    @apply text-muted-foreground text-xs font-medium;
+  }
+
+  /* —— Failover 链 —— */
+  .failover {
+    @apply space-y-2;
+  }
+
+  .failover-list {
+    @apply flex flex-col gap-1.5;
+  }
+
+  .failover-item {
+    @apply border-border bg-background flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2 text-xs;
+  }
+
+  .failover-index {
+    @apply bg-primary/10 text-primary flex size-5 items-center justify-center rounded-full text-[10px] font-semibold;
+  }
+
+  .failover-provider {
+    @apply font-medium;
+  }
+
+  .failover-model {
+    @apply bg-muted rounded px-1.5 py-0.5 font-mono text-xs;
+  }
+
+  .failover-weight {
+    @apply text-muted-foreground ml-auto;
+  }
+
+  /* —— Trace —— */
+  .trace-list {
+    @apply grid gap-3 lg:grid-cols-2;
+  }
+
+  .trace-card {
+    @apply border-border bg-background rounded-lg border p-3;
+  }
+
+  .trace-head {
+    @apply mb-2 flex flex-wrap items-center gap-2;
+  }
+
+  .trace-name {
+    @apply text-sm font-semibold;
+  }
+
+  .trace-time {
+    @apply text-muted-foreground ml-auto text-xs;
+  }
+
+  .trace-meta {
+    @apply text-muted-foreground flex flex-wrap gap-x-4 gap-y-1 text-xs;
+  }
+
+  .trace-detail {
+    @apply mt-2 text-xs;
+  }
+
+  .trace-detail summary {
+    @apply text-muted-foreground cursor-pointer select-none;
+  }
+}

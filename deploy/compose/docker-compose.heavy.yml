@@ -1,0 +1,319 @@
+# 重型组件栈 · 与本地已跑通的服务隔离运行
+#
+# 用途：在同一台机器上并行运行方案原版重型组件（Keycloak / Langfuse+ClickHouse /
+#       Infinity / TEI / RAGFlow / DB-GPT），不抢占已跑通链路的端口与容器名。
+#
+# 用法：
+#   cd deploy/compose
+#   VOLUME_PREFIX=eapheavy docker compose -p eapheavy \
+#     -f docker-compose.yml -f docker-compose.heavy.yml up -d \
+#     keycloak langfuse-web langfuse-worker clickhouse infinity tei
+#
+# 说明：
+#   - 容器名加 eapheavy- 前缀，避免与 scripts/start-infra.sh 起的 eap-* 冲突
+#   - 宿主端口整体右移，与现有 5432/6379/9000/9001 错开
+#   - TEI 走 hf-mirror 镜像源（直连 huggingface.co 在本网络不可达）
+#   - volumes 通过 VOLUME_PREFIX=eapheavy 隔离
+services:
+  postgres:
+    container_name: eapheavy-postgres
+    # 重型栈的 PG 只服务两个库：langfuse（Langfuse 元数据）与 dbgpt（DB-GPT 元数据），
+    # 两者都由各自的 init 脚本建。这里把 POSTGRES_DB 改成 postgres ——
+    #   · postgres 官方 entrypoint 遇 POSTGRES_DB=postgres 会**跳过建库**（不额外建）
+    #   · 而基础 compose 里的默认值是 eap，会在初始化时白建一个没人用的空库
+    #     （实测：eapheavy-postgres 里躺着一个 0 张表的 eap 库，7.6 MB，纯属误导）
+    environment: !override
+      POSTGRES_USER: ${POSTGRES_USER:-eap}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-CHANGE_ME_postgres_password}
+      POSTGRES_DB: postgres
+      PGDATA: /var/lib/postgresql/data/pgdata
+      TZ: ${TZ:-Asia/Shanghai}
+    ports: !override
+      - "127.0.0.1:5433:5432"
+
+  redis:
+    container_name: eapheavy-redis
+    ports: !override
+      - "127.0.0.1:6381:6379"
+
+  minio:
+    container_name: eapheavy-minio
+    ports: !override
+      - "127.0.0.1:9002:9000"
+      - "127.0.0.1:9003:9001"
+
+  minio-init:
+    container_name: eapheavy-minio-init
+
+  clickhouse:
+    container_name: eapheavy-clickhouse
+    ports: !override
+      - "127.0.0.1:8124:8123"
+      - "127.0.0.1:9004:9000"
+
+  mysql:
+    container_name: eapheavy-mysql
+    ports: !override
+      - "127.0.0.1:3307:3306"
+
+  langfuse-web:
+    container_name: eapheavy-langfuse-web
+    ports: !override
+      - "127.0.0.1:3001:3000"
+
+  langfuse-worker:
+    container_name: eapheavy-langfuse-worker
+
+  keycloak:
+    container_name: eapheavy-keycloak
+    ports: !override
+      - "127.0.0.1:8082:8080"
+
+  infinity:
+    container_name: eapheavy-infinity
+    # —— 本机 CPU（Xeon E5-2697 v2 / Ivy Bridge）仅有 AVX，无 AVX2。
+    #    Infinity 官方要求 x86_64 + AVX2，原生运行会 SIGILL（invalid opcode）。
+    #    这里用 QEMU 用户态模拟运行：QEMU 的 TCG 目标机自带 AVX2/AVX-512 语义，
+    #    不受宿主 CPU 限制。代价是吞吐下降，仅适合 POC / 小规模检索。
+    #    换到支持 AVX2 的机器（如 Haswell 以后）应去掉 qemu 前缀直接原生运行。
+    entrypoint: ["/usr/bin/qemu-x86_64-static", "/usr/bin/infinity"]
+    volumes:
+      - /usr/bin/qemu-x86_64-static:/usr/bin/qemu-x86_64-static:ro
+    ports: !override
+      - "127.0.0.1:23818:23817"
+      - "127.0.0.1:23821:23820"
+      # PSQL 协议端口 —— 平台侧用标准 SQL 客户端接入 Infinity
+      # 宿主 5433 已被重型栈自己的 postgres 占用，故用 5434
+      - "127.0.0.1:5434:5432"
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # RAGFlow 专用 Infinity 实例（0.6.x）
+  #
+  # 原因：RAGFlow v0.22.1 镜像内置的 infinity-sdk 客户端线上协议版本为 0.6.7，
+  #      与平台侧使用的 0.7.5 服务端版本握手失败：
+  #        (2004, 'Expected version index: 0.7.5, connecting version: 0.6.7')
+  #      实测（用 RAGFlow 容器内的真实客户端）：
+  #        连 0.6.5 服务端 → 成功；连 0.7.5 服务端 → 版本不匹配
+  #      因此 RAGFlow 单独使用 0.6.5 实例（镜像本地已缓存，无需联网拉取），
+  #      平台自身的检索链路继续用 0.7.5（已通过 9 项检索语义验收）。
+  #
+  # 数据完全隔离：独立数据卷、独立数据库，RAGFlow 使用自己的 default_db。
+  # ──────────────────────────────────────────────────────────────────────────
+  infinity-ragflow:
+    image: ${INFINITY_RAGFLOW_IMAGE:-infiniflow/infinity:v0.6.5}
+    container_name: eapheavy-infinity-ragflow
+    # 同样需要 QEMU 用户态模拟（宿主无 AVX2），理由同 infinity 服务
+    entrypoint: ["/usr/bin/qemu-x86_64-static", "/usr/bin/infinity"]
+    command: ["-f", "/infinity_conf.toml"]
+    volumes:
+      - /usr/bin/qemu-x86_64-static:/usr/bin/qemu-x86_64-static:ro
+      - ./ragflow/infinity_conf_v065.toml:/infinity_conf.toml:ro
+      - infinity-ragflow-data:/var/infinity
+    networks:
+      - eap_data
+      - eap_ops
+    ulimits:
+      nofile:
+        soft: 500000
+        hard: 500000
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:23820/admin/node/current"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    mem_limit: ${INFINITY_RAGFLOW_MEM_LIMIT:-2g}
+    cpus: ${INFINITY_RAGFLOW_CPUS:-1.0}
+
+  tei:
+    container_name: eapheavy-tei
+    # TEI 只认 --model-id（可传本地目录），不认 TEI_MODEL_PATH 环境变量。
+    # 这里指向宿主机已落盘的模型目录，避免运行时联网下载。
+    command:
+      - --model-id
+      - ${TEI_MODEL_PATH:-/data/model}
+      - --auto-truncate
+      - --port
+      - "80"
+    environment:
+      HF_HOME: /data
+      HUGGINGFACE_HUB_CACHE: /data/hub
+      HF_ENDPOINT: ${HF_ENDPOINT:-https://hf-mirror.com}
+    volumes:
+      - ${TEI_MODEL_HOST_DIR:-../../data/models/multilingual-e5-small}:/data/model:ro
+    ports: !override
+      - "127.0.0.1:6380:80"
+
+  ragflow:
+    container_name: eapheavy-ragflow
+    # 宿主 9380 未占用；Web 界面从 80 移到 8095（80 是特权端口，且避免与潜在 Web 服务冲突）
+    ports: !override
+      - "127.0.0.1:9380:9380"
+      - "127.0.0.1:8095:80"
+    # RAGFlow 的 infinity 客户端是 0.6.x 协议 → 指向专用的 0.6.5 实例
+    environment:
+      INFINITY_HOST: infinity-ragflow
+      INFINITY_THRIFT_PORT: "23817"
+      INFINITY_HTTP_PORT: "23820"
+      INFINITY_PSQL_PORT: "5432"
+      # —— 关闭 RAGFlow 自注册 ——
+      # RAGFlow 的 Web 界面走 8095 对公网开放后，任何人都能调 POST /v1/user/register
+      # 建号并占用模型/解析资源。REGISTER_ENABLED=0 只保留已有账号登录
+      # （平台固定账号 eap-admin@eap.local）。
+      # ⚠ 首次播种该账号需要临时置 1 跑一次 scripts/verify-ragflow.py；
+      #   账号建好后即可长期关闭。
+      REGISTER_ENABLED: "${RAGFLOW_REGISTER_ENABLED:-0}"
+      # —— 走本地 TEI 做嵌入（数据不出域）——
+      # 源码判定是子串匹配："tei-" in COMPOSE_PROFILES（见 common/settings.py:206、
+      # rag/llm/embedding_model.py:75、tenant_llm_service.py:116）
+      COMPOSE_PROFILES: "infinity tei-"
+      # TEI_MODEL 必须与 llm 表中 Builtin 嵌入模型的 llm_name 完全一致，
+      # 否则 Builtin 分支不会绑定到 TEI 的 base_url
+      TEI_MODEL: ${RAGFLOW_TEI_MODEL:-BAAI/bge-m3}
+      # —— DeepDoc / 分词器等模型下载走 hf-mirror（直连 huggingface.co 本机不可达）——
+      HF_ENDPOINT: ${HF_ENDPOINT:-https://hf-mirror.com}
+      HF_HUB_ENABLE_HF_TRANSFER: "0"
+      # —— Keycloak SSO 登录渠道（eap-entrypoint.sh 渲染进 conf/local.service_conf.yaml）——
+      # 浏览器侧地址走公网（用户电脑要能打开）。后端侧（换 token / 拉 userinfo）
+      # 默认同样走公网地址：Keycloak 动态 hostname 下令牌 iss 跟随签发时的请求 Host，
+      # 后端侧若换成容器内 keycloak:8080 会导致 userinfo 401。
+      # Keycloak 若改为固定 hostname，可把 BACKEND 指回内部地址。
+      # 4 个变量全空 = 不启用 SSO（仅本地账号登录）；只配一半 = 启动失败。
+      EAP_PUBLIC_KEYCLOAK_ORIGIN: "${EAP_PUBLIC_KEYCLOAK_ORIGIN:-}"
+      EAP_PUBLIC_RAGFLOW_ORIGIN: "${EAP_PUBLIC_RAGFLOW_ORIGIN:-}"
+      RAGFLOW_OAUTH_CLIENT_ID: "${RAGFLOW_OAUTH_CLIENT_ID:-eap-ragflow}"
+      RAGFLOW_OAUTH_CLIENT_SECRET: "${RAGFLOW_OAUTH_CLIENT_SECRET:-}"
+      RAGFLOW_OAUTH_KEYCLOAK_BACKEND: "${RAGFLOW_OAUTH_KEYCLOAK_BACKEND:-}"
+      RAGFLOW_OAUTH_REALM: "${KEYCLOAK_REALM:-enterprise}"
+      # 登录拦截页跳转的渠道名（必须与 login-sso.html 里的一致，否则启动时报错）
+      RAGFLOW_SSO_CHANNEL: "${RAGFLOW_SSO_CHANNEL:-keycloak}"
+    # 允许 py-spy 抓调用栈（排查解析任务卡住时定位阻塞点）
+    cap_add:
+      - SYS_PTRACE
+    # —— 启动前补丁层：把 Infinity ConnectionPool 的 max_size 从 32 收敛到 8 ——
+    # infinity-sdk 的 ConnectionPool.__init__ 会**预建** max_size 条 Thrift 连接；
+    # 容器内 ragflow_server / sync_data_source / task_executor 三个进程各建一份
+    # 连接池，3×32=96 会超过 Infinity 的连接上限，导致 task_executor（唯一注册
+    # Redis 消费者的进程）握手永久阻塞、解析任务全部堆积。详见脚本内注释。
+    entrypoint: ["/bin/bash", "/ragflow/eap-entrypoint.sh"]
+    volumes:
+      - ./ragflow/eap-entrypoint.sh:/ragflow/eap-entrypoint.sh:ro
+      # —— 补齐镜像缺失的 nginx 配置 ——
+      # infiniflow/ragflow:v0.22.1 镜像的 /etc/nginx 是 Debian 默认站点
+      # （conf.d/ 为空、sites-enabled/default 的 root 是 /var/www/html），
+      # 导致 80 端口返回 "Welcome to nginx!" 而不是 RAGFlow 界面。
+      # 这里以只读挂载覆盖，主配置不再 include sites-enabled/*，
+      # 因此 Debian 默认站点不再生效。前端产物在 /ragflow/web/dist（镜像自带）。
+      - ./ragflow/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ragflow/nginx/ragflow.conf:/etc/nginx/conf.d/ragflow.conf:ro
+      - ./ragflow/nginx/proxy.conf:/etc/nginx/proxy.conf:ro
+      # —— 登录拦截页（中文说明 + 兜底链接，由 eap-entrypoint.sh 生成同目录的
+      #    ragflow-sso.conf 片段，nginx 拦截 /login 跳企业账号登录）——
+      - ./ragflow/nginx/login-sso.html:/etc/nginx/sso/login-sso.html:ro
+      # —— 登出后回落页（SSO 会话一并结束后停在这里）——
+      - ./ragflow/nginx/logout-done.html:/etc/nginx/sso/logout-done.html:ro
+      # —— 登出补丁脚本：给 RAGFlow 后端写 id_token Cookie 与一次性登出标记，
+      #    nginx 据此在登出时结束 Keycloak 单点登录会话（否则登出后被 SSO 秒登回来）——
+      - ./ragflow/eap-patch-sso-logout.py:/ragflow/eap-patch-sso-logout.py:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      infinity-ragflow:
+        condition: service_healthy
+
+  db-gpt:
+    container_name: eapheavy-dbgpt
+    # 官方镜像缺 PostgreSQL 驱动（webserver 元数据库用 postgresql 时会
+    # 抛 ModuleNotFoundError: No module named 'psycopg2'），
+    # 用 deploy/compose/dbgpt/Dockerfile 打的补丁镜像（基础层复用，不重下 21GB）。
+    image: ${DBGPT_HEAVY_IMAGE:-eapheavy/dbgpt:0.8.3-pg}
+    # 宿主 8092 已被平台自身的 ChatBI MCP Server 占用，整体右移：
+    #   8094 → 容器 8092（模型 API Server，OpenAI 兼容）
+    #   8096 → 容器 8093（DB-GPT Web Server：datasource / Text2SQL / awesomes）
+    #   8097 → 容器 8094（DB-GPT 的 MCP Server 适配器，见 deploy/compose/dbgpt/mcp_adapter.py）
+    ports: !override
+      - "127.0.0.1:8094:8092"
+      - "127.0.0.1:8096:8093"
+      - "127.0.0.1:8097:8094"
+    # DB-GPT 官方镜像没有 `dbgpt mcp server` 子命令（0.9.x 从未发布：Docker Hub / PyPI /
+    # GitHub 发行版最高均为 0.8.3，main 分支版本号亦为 0.8.3 且 CLI 无 mcp），
+    # DB-GPT 的 MCP 方向是客户端（connector）。因此：
+    #   · 组件本体按 **原生形态** 运行：controller + worker + apiserver + webserver
+    #   · MCP Server 角色由容器内的薄适配器承担（mcp_adapter.py，FastMCP +
+    #     streamable-http），把 DB-GPT 的 ChatBI 能力按 MCP 协议暴露出去
+    entrypoint: ["/bin/sh", "-c"]
+    # DB-GPT 的模型服务是 controller / worker / apiserver 三件套：
+    #   apiserver 对外提供 OpenAI 兼容端口，并经 controller 发现 worker 上的模型
+    # webserver 复用同一个 controller，不重复加载模型
+    command:
+      - |
+        mkdir -p /app/logs
+        dbgpt start controller -c /app/dbgpt.toml > /app/logs/controller.log 2>&1 &
+        sleep 10
+        dbgpt start worker -c /app/dbgpt.toml > /app/logs/worker.log 2>&1 &
+        sleep 8
+        # 非 SQLite 元数据库需要显式建表（DB-GPT 只对 SQLite 自动 create_all）
+        python3 /app/init_db.py > /app/logs/init_db.log 2>&1 || echo "[warn] init_db 失败，见 /app/logs/init_db.log"
+        python3 /app/webserver_boot.py /app/dbgpt.toml > /app/logs/webserver.log 2>&1 &
+        sleep 5
+        # DB-GPT 的 MCP Server 适配器（FastMCP + streamable-http）
+        python3 /app/mcp_adapter.py > /app/logs/mcp_adapter.log 2>&1 &
+        exec dbgpt start apiserver -c /app/dbgpt.toml
+    environment:
+      # —— 元数据库：平台 PostgreSQL ——
+      DBGPT_DB_HOST: postgres
+      DBGPT_DB_PORT: "5432"
+      DBGPT_DB_USER: ${POSTGRES_USER:-eap}
+      DBGPT_DB_PASSWORD: ${POSTGRES_PASSWORD:-eap-local-pg-2026}
+      DBGPT_DB_NAME: ${DBGPT_DATABASE:-dbgpt}
+      DBGPT_API_KEY: ${DBGPT_API_KEY:-eap-dbgpt-local-key}
+      DBGPT_ENCRYPT_KEY: ${DBGPT_ENCRYPT_KEY:-eap-local-dbgpt-encrypt-2026}
+      DBGPT_LANG: ${DBGPT_LANG:-zh}
+      DBGPT_RAG_PATH: /app/data/rag
+      # —— LLM 指向 agentgateway 的 OpenAI 兼容端口（不直连商业 API，见 4.4）——
+      # 网关当前以宿主进程运行（127.0.0.1:8080），容器内需经 host-gateway 访问
+      OPENAI_API_BASE: http://host.docker.internal:8080/v1
+      OPENAI_API_KEY: ${DBGPT_API_KEY:-eap-dbgpt-local-key}
+      LLM_MODEL_NAME: smart-model
+      LLM_MODEL_PROVIDER: proxy/openai
+      # —— Embedding 指向本地 TEI（数据不出域）——
+      EMBEDDING_MODEL_NAME: embedding-model
+      EMBEDDING_MODEL_PROVIDER: proxy/openai
+      EMBEDDING_MODEL_API_URL: http://tei:80/embed
+      EMBEDDING_API_KEY: empty
+      # —— MCP Server 适配器 ——
+      DBGPT_APISERVER: http://127.0.0.1:8092
+      DBGPT_MCP_HOST: 0.0.0.0
+      DBGPT_MCP_PORT: "8094"
+      DBGPT_DATASOURCE: eap_sales
+      DBGPT_DATASOURCE_PATH: /app/datasources/chatbi.db
+      DBGPT_METRICS_PATH: /app/metrics.json
+      # —— DB-GPT 作为 MCP 客户端：注册平台 MCP Server ——
+      DBGPT_PLATFORM_MCP_SERVERS: >-
+        eap-knowledge=http://host.docker.internal:8091/mcp,eap-business=http://host.docker.internal:8093/mcp
+      TZ: ${TZ:-Asia/Shanghai}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./dbgpt/dbgpt.toml:/app/dbgpt.toml:ro
+      - ./dbgpt/init_db.py:/app/init_db.py:ro
+      - ./dbgpt/mcp_adapter.py:/app/mcp_adapter.py:ro
+      - ./dbgpt/webserver_boot.py:/app/webserver_boot.py:ro
+      - ./dbgpt/register_platform_mcp.py:/app/register_platform_mcp.py:ro
+      # 指标口径字典：与平台侧共用同一份 JSON（单一数据源，两边口径不会漂移）
+      - ../../packages/mcp-hub/src/servers/metrics.json:/app/metrics.json:ro
+      # 平台 ChatBI 演示数据集 —— 注册进 DB-GPT 自己的数据源注册表
+      - ../../data/chatbi.db:/app/datasources/chatbi.db
+      - dbgpt-data:/app/data
+
+  envoy:
+    container_name: eapheavy-envoy
+    # 宿主端口必须右移 —— 基础 compose 里的 envoy 用的是 15000/15001/9901，
+    # 已被平台栈正在运行的 eap-envoy 占着。不右移的话，重型栈一旦带 envoy 启动
+    # 就会因端口占用直接失败（这是实测发现的潜在冲突）。
+    ports: !override
+      - "127.0.0.1:15010:15000"
+      - "127.0.0.1:15011:15001"
+      - "127.0.0.1:9911:9901"

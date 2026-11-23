@@ -1,0 +1,200 @@
+{{/* ===================================================================
+  身份层：Keycloak 26（见 3.1 身份组件 / 7.1 身份与多租户）
+  =================================================================== */}}
+{{- if .Values.identityLayer.keycloak.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "eap.fullname" . }}-keycloak
+  namespace: {{ include "eap.ns.support" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: keycloak
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "eap.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: keycloak
+  ports:
+    - name: http
+      port: {{ .Values.identityLayer.keycloak.service.port }}
+      targetPort: http
+---
+{{- if not .Values.identityLayer.keycloak.realm.externalSecret }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "eap.fullname" . }}-keycloak-realm
+  namespace: {{ include "eap.ns.support" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: keycloak
+data:
+  # —— realm 占位内容：生产建议由企业统一身份治理流程维护（见 7.1）
+  realm-{{ .Values.identityLayer.keycloak.realm.name }}.json: |
+    {
+      "realm": "{{ .Values.identityLayer.keycloak.realm.name }}",
+      "enabled": true,
+      "sslRequired": "none",
+      "loginWithEmailAllowed": true,
+      "registrationAllowed": false,
+      "roles": {
+        "realm": [
+          { "name": "eap-admin", "description": "平台管理员" },
+          { "name": "eap-user", "description": "普通业务用户" },
+          { "name": "eap-auditor", "description": "审计只读" },
+          { "name": "eap-approver", "description": "HITL 人工确认审批人" }
+        ]
+      },
+      "clients": [
+        {
+          "clientId": "eap-webui",
+          "name": "AgentScope Web UI（唯一用户入口）",
+          "enabled": true,
+          "publicClient": true,
+          "standardFlowEnabled": true,
+          "directAccessGrantsEnabled": true,
+          "redirectUris": ["http://{{ .Values.ingress.host }}{{ .Values.ingress.paths.api }}/*"],
+          "webOrigins": ["http://{{ .Values.ingress.host }}"],
+          "attributes": { "post.logout.redirect.uris": "http://{{ .Values.ingress.host }}/*" }
+        },
+        {
+          "clientId": "eap-agent",
+          "name": "AgentScope Service",
+          "enabled": true,
+          "publicClient": false,
+          "secret": "CHANGE_ME_agent_client_secret",
+          "serviceAccountsEnabled": true,
+          "directAccessGrantsEnabled": true,
+          "standardFlowEnabled": false
+        }
+      ],
+      "users": [
+        {
+          "username": "eap-admin",
+          "email": "eap-admin@example.com",
+          "enabled": true,
+          "emailVerified": true,
+          "credentials": [
+            { "type": "password", "value": "CHANGE_ME_admin_user_password", "temporary": true }
+          ],
+          "realmRoles": ["eap-admin", "eap-user"]
+        }
+      ]
+    }
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "eap.fullname" . }}-keycloak
+  namespace: {{ include "eap.ns.support" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: keycloak
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "eap.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: keycloak
+  template:
+    metadata:
+      labels:
+        {{- include "eap.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: keycloak
+    spec:
+      {{- include "eap.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: keycloak
+          image: {{ include "eap.image" (dict "root" . "repository" .Values.identityLayer.keycloak.image.repository "tag" .Values.identityLayer.keycloak.image.tag) }}
+          imagePullPolicy: IfNotPresent
+          args: ["start", "--optimized", "--import-realm"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.identityLayer.keycloak.service.port }}
+          env:
+            - name: KC_BOOTSTRAP_ADMIN_USERNAME
+              value: {{ .Values.identityLayer.keycloak.auth.adminUser | quote }}
+            - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: keycloak-admin-password
+            - name: KC_HTTP_ENABLED
+              value: "true"
+            - name: KC_HTTP_PORT
+              value: {{ .Values.identityLayer.keycloak.service.port | quote }}
+            - name: KC_HOSTNAME_STRICT
+              value: "false"
+            - name: KC_PROXY_HEADERS
+              value: "xforwarded"
+            - name: KC_HEALTH_ENABLED
+              value: "true"
+            - name: KC_METRICS_ENABLED
+              value: "true"
+            - name: TZ
+              value: {{ .Values.global.tz | quote }}
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 10
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 10
+          resources:
+            {{- toYaml .Values.identityLayer.keycloak.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: realm
+              mountPath: /opt/keycloak/data/import
+              readOnly: true
+            - name: data
+              mountPath: /opt/keycloak/data
+      volumes:
+        {{- if .Values.identityLayer.keycloak.realm.externalSecret }}
+        - name: realm
+          secret:
+            secretName: {{ .Values.identityLayer.keycloak.realm.externalSecret }}
+        {{- else }}
+        - name: realm
+          configMap:
+            name: {{ include "eap.fullname" . }}-keycloak-realm
+        {{- end }}
+        - name: data
+          emptyDir: {}
+{{- if .Values.identityLayer.keycloak.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "eap.fullname" . }}-keycloak
+  namespace: {{ include "eap.ns.support" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: keycloak
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  rules:
+    - host: {{ .Values.identityLayer.keycloak.ingress.host }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "eap.fullname" . }}-keycloak
+                port:
+                  name: http
+{{- end }}
+{{- end }}

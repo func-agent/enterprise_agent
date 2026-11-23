@@ -1,0 +1,65 @@
+{{/* ===================================================================
+  单一前端入口（见 2.1 设计原则「单一前端：AgentScope Web UI 是唯一用户入口」）
+  路由：
+    /       → AgentScope Web UI（静态资源）
+    /api/   → AgentScope Service（会话 / HITL）
+    /v1/    → agentgateway（OpenAI 兼容接口 / MCP 治理）
+  =================================================================== */}}
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "eap.fullname" . }}
+  namespace: {{ include "eap.ns.app" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ingress
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host }}
+      secretName: {{ .Values.ingress.tls.secretName }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host }}
+      http:
+        paths:
+          # —— AgentScope AG-UI SSE
+          - path: /ag-ui
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "eap.fullname" . }}-agent-core
+                port:
+                  name: http
+          # —— AgentScope Service
+          - path: {{ .Values.ingress.paths.api }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "eap.fullname" . }}-agent-core
+                port:
+                  name: http
+          # —— agentgateway
+          - path: {{ .Values.ingress.paths.gateway }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "eap.fullname" . }}-agentgateway
+                port:
+                  name: http
+          # —— 前端
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "eap.fullname" . }}-webui
+                port:
+                  name: http
+{{- end }}

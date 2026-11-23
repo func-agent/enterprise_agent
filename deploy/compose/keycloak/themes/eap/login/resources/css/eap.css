@@ -1,0 +1,348 @@
+:root {
+  --eap-background: #f5f8fc;
+  --eap-card: #ffffff;
+  --eap-text: #17233b;
+  --eap-muted: #5d6b82;
+  --eap-border: #d8e0eb;
+  --eap-input-border: #cbd5e1;
+  --eap-primary: #175dbf;
+  --eap-primary-hover: #124da5;
+  --eap-primary-contrast: #ffffff;
+  --eap-focus-ring: rgb(23 93 191 / 14%);
+  --eap-glow-start: rgb(23 93 191 / 8%);
+  --eap-glow-end: rgb(80 132 204 / 10%);
+  color-scheme: light;
+}
+
+html.pf-v5-theme-dark {
+  --eap-background: #111827;
+  --eap-card: #182235;
+  --eap-text: #e7edf7;
+  --eap-muted: #a0aec3;
+  --eap-border: #304158;
+  --eap-input-border: #42516a;
+  --eap-primary: #6b9cf8;
+  --eap-primary-hover: #83affa;
+  --eap-primary-contrast: #0b1525;
+  --eap-focus-ring: rgb(107 156 248 / 20%);
+  --eap-glow-start: rgb(55 104 184 / 14%);
+  --eap-glow-end: rgb(36 69 124 / 16%);
+  color-scheme: dark;
+}
+
+.login-pf {
+  min-height: 100%;
+  background: var(--eap-background);
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+.login-pf body {
+  height: auto;
+  min-width: 320px;
+  min-height: 100vh;
+  background: transparent;
+  color: var(--eap-text);
+  font-size: 14px;
+}
+
+.pf-v5-c-login {
+  min-height: 100vh;
+  padding: 40px 16px;
+  align-items: center;
+  background:
+    radial-gradient(circle at 8% 4%, var(--eap-glow-start), transparent 30rem),
+    radial-gradient(circle at 94% 96%, var(--eap-glow-end), transparent 28rem),
+    var(--eap-background);
+}
+
+.pf-v5-c-login__container {
+  width: 100%;
+  max-width: 420px;
+  padding: 0;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+}
+
+.pf-v5-c-login__header {
+  margin: 0 0 24px;
+  padding: 0;
+}
+
+#kc-header-wrapper {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--eap-text) !important;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.5;
+  letter-spacing: 0;
+  text-align: left;
+  text-transform: none;
+}
+
+#kc-header-wrapper::before {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+  background: url("../img/eap-logo.svg") center / contain no-repeat;
+  content: "";
+}
+
+#kc-header-wrapper .kc-logo-text {
+  width: auto;
+  height: auto;
+  margin: 0;
+  background: none;
+}
+
+#kc-header-wrapper .kc-logo-text span {
+  display: inline;
+}
+
+.pf-v5-c-login__main {
+  padding: 32px;
+  border: 1px solid var(--eap-border);
+  border-radius: 12px;
+  background: var(--eap-card);
+  box-shadow: 0 4px 6px -2px rgb(23 35 59 / 4%), 0 14px 36px -18px rgb(23 35 59 / 18%);
+  color: var(--eap-text);
+}
+
+.pf-v5-c-login__main-header {
+  grid-template-columns: minmax(0, 1fr);
+  margin: 0 0 24px;
+  padding: 0;
+}
+
+#kc-page-title {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--eap-text);
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: -0.01em;
+}
+
+.pf-v5-c-login__main-header::after {
+  grid-column: 1 / -1;
+  margin-top: 6px;
+  color: var(--eap-muted);
+  content: "使用与当前入口匹配的企业身份安全登录。";
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.pf-v5-c-login__main-body {
+  min-width: 0;
+  padding: 0;
+}
+
+.pf-v5-c-form {
+  row-gap: 0;
+  column-gap: 0;
+}
+
+.pf-v5-c-form__group {
+  margin-bottom: 20px;
+}
+
+.pf-v5-c-form__group:last-child {
+  margin-bottom: 0;
+}
+
+.pf-v5-c-form__label {
+  color: var(--eap-text);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+label.pf-v5-c-form__label {
+  margin-bottom: 6px;
+}
+
+.pf-v5-c-form-control {
+  min-height: 40px;
+  border: 1px solid var(--eap-input-border);
+  border-radius: 6px;
+  background: var(--eap-card);
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+span.pf-v5-c-form-control {
+  display: flex;
+  align-items: center;
+}
+
+.pf-v5-c-form-control::before,
+.pf-v5-c-form-control::after {
+  display: none;
+}
+
+.pf-v5-c-form-control:hover {
+  border-color: var(--eap-primary);
+}
+
+.pf-v5-c-form-control:focus,
+.pf-v5-c-form-control:focus-within {
+  border-color: var(--eap-primary);
+  box-shadow: 0 0 0 3px var(--eap-focus-ring);
+  outline: none;
+}
+
+.pf-v5-c-form-control input,
+input.pf-v5-c-form-control {
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  height: 38px;
+  padding: 0 11px;
+  border: 0;
+  background: transparent;
+  color: var(--eap-text);
+  font-size: 14px;
+  outline: none;
+}
+
+.pf-v5-c-form-control input:-webkit-autofill,
+.pf-v5-c-form-control input:-webkit-autofill:hover,
+.pf-v5-c-form-control input:-webkit-autofill:focus {
+  -webkit-text-fill-color: var(--eap-text);
+  -webkit-box-shadow: 0 0 0 1000px var(--eap-card) inset;
+  box-shadow: 0 0 0 1000px var(--eap-card) inset;
+}
+
+.pf-v5-c-form-control input:-moz-autofill {
+  background: var(--eap-card);
+  color: var(--eap-text);
+}
+
+.pf-v5-c-form-control__utilities {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+}
+
+.pf-v5-c-input-group {
+  align-items: stretch;
+}
+
+.pf-v5-c-input-group__item.pf-m-fill {
+  min-width: 0;
+}
+
+.pf-v5-c-input-group__item.pf-m-fill .pf-v5-c-form-control {
+  width: 100%;
+  border-start-end-radius: 0;
+  border-end-end-radius: 0;
+}
+
+.pf-v5-c-input-group__item > .pf-v5-c-button.pf-m-control {
+  min-width: 42px;
+  min-height: 40px;
+  border: 1px solid var(--eap-input-border);
+  border-inline-start: 0;
+  border-radius: 0 6px 6px 0;
+  background: var(--eap-card);
+  color: var(--eap-muted);
+}
+
+.pf-v5-c-input-group__item > .pf-v5-c-button.pf-m-control::after {
+  display: none;
+}
+
+.pf-v5-c-form__actions {
+  margin: 0;
+}
+
+.pf-v5-c-form__actions .pf-v5-c-button {
+  margin: 0;
+}
+
+.pf-v5-c-button.pf-m-primary {
+  min-height: 40px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--eap-primary);
+  color: var(--eap-primary-contrast);
+  font-size: 14px;
+  font-weight: 500;
+  box-shadow: none;
+}
+
+.pf-v5-c-button.pf-m-primary::after {
+  display: none;
+}
+
+.pf-v5-c-button.pf-m-primary:hover {
+  background: var(--eap-primary-hover);
+}
+
+.pf-v5-c-button.pf-m-primary:focus-visible,
+.pf-v5-c-button.pf-m-control:focus-visible {
+  outline: 3px solid var(--eap-focus-ring);
+  outline-offset: 2px;
+}
+
+.pf-v5-c-form__helper-text {
+  margin-top: 8px;
+}
+
+.pf-v5-c-login a,
+.pf-v5-c-login a:visited {
+  color: var(--eap-primary);
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.pf-v5-c-login a:hover {
+  text-decoration: underline;
+}
+
+.pf-v5-c-alert {
+  margin-bottom: 16px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.pf-v5-c-login__main-footer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 24px;
+  padding-top: 16px;
+  border-top: 1px solid var(--eap-border);
+  color: var(--eap-muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.pf-v5-c-login__main-footer::before {
+  content: "统一身份认证 · 权限隔离 · 审计留痕";
+}
+
+@media (max-width: 479.98px) {
+  .pf-v5-c-login {
+    padding: 24px 16px;
+  }
+
+  .pf-v5-c-login__header {
+    margin-bottom: 20px;
+  }
+
+  #kc-header-wrapper {
+    font-size: 15px;
+  }
+
+  #kc-header-wrapper::before {
+    width: 36px;
+    height: 36px;
+    flex-basis: 36px;
+  }
+
+  .pf-v5-c-login__main {
+    padding: 24px 20px;
+  }
+}

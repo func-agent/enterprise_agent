@@ -1,0 +1,449 @@
+# =============================================================================
+# 企业级 AI Agent 平台 —— Helm values
+#
+# 依据《建设方案》第 9 章：
+#   9.2 部署形态：生产 K8s（或 K3s）+ Helm，组件按层分 namespace
+#   9.3 网络要求：内网互通 + 出网白名单（禁止业务组件直连商业 API）
+#   9.4 关键部署参数：agentgateway 2 副本 + PDB / DOC_ENGINE=infinity / MinIO 版本化
+#
+# 分层组织：supportLayer / identityLayer / knowledgeLayer / chatbiLayer /
+#          gatewayLayer / appLayer / observabilityLayer / securityLayer
+# =============================================================================
+
+global:
+  # 时区
+  tz: Asia/Shanghai
+  # 全局拉取镜像的 Secret
+  imagePullSecrets: []
+  # 存储类（留空使用集群默认 StorageClass）
+  storageClass: ""
+
+# —— 镜像仓（离线环境填 Harbor 地址，见 README「离线镜像仓接入」）
+imageRegistry: ""
+# 例：imageRegistry: harbor.corp.example.com/eap
+
+# —— 按层划分的 namespace（9.2：组件按层分 namespace）
+namespaces:
+  support: eap-support   # 支撑层：PG / Redis / MinIO / ClickHouse / Keycloak
+  app: eap-app           # 应用层：Web UI / AgentScope / agentgateway / MCP Hub
+  data: eap-data         # 数据层：RAGFlow / Infinity / TEI / DB-GPT
+
+# —— 生产默认资源基线（9.1：3 台 16C/48-64G）
+supportLayer:
+  postgres:
+    enabled: true
+    image:
+      repository: postgres
+      tag: "16"
+    service:
+      port: 5432
+    auth:
+      username: eap
+      password: CHANGE_ME_postgres_password
+      database: eap
+    storage:
+      size: 50Gi
+      storageClass: ""
+    resources:
+      requests:
+        cpu: "500m"
+        memory: 2Gi
+      limits:
+        cpu: "2"
+        memory: 4Gi
+    persistence:
+      enabled: true
+  redis:
+    enabled: true
+    image:
+      repository: redis
+      tag: "7"
+    service:
+      port: 6379
+    auth:
+      password: CHANGE_ME_redis_password
+    storage:
+      size: 10Gi
+      storageClass: ""
+    resources:
+      requests:
+        cpu: "200m"
+        memory: 512Mi
+      limits:
+        cpu: "1"
+        memory: 2Gi
+    persistence:
+      enabled: true
+  minio:
+    enabled: true
+    image:
+      repository: quay.io/minio/minio
+      tag: RELEASE.2025-04-22T22-12-26Z
+    service:
+      apiPort: 9000
+      consolePort: 9001
+    auth:
+      rootUser: eapadmin
+      rootPassword: CHANGE_ME_minio_password
+    # 审计归档桶 + 版本化（见 3.1 / 9.4「MinIO：开启版本化」）
+    buckets:
+      - name: eap-audit
+        versioning: true
+      - name: langfuse
+        versioning: true
+      - name: ragflow
+        versioning: true
+    storage:
+      size: 200Gi
+      storageClass: ""
+    resources:
+      requests:
+        cpu: "500m"
+        memory: 2Gi
+      limits:
+        cpu: "2"
+        memory: 4Gi
+    persistence:
+      enabled: true
+  clickhouse:
+    enabled: true
+    image:
+      repository: clickhouse/clickhouse-server
+      tag: 24.8-alpine
+    service:
+      httpPort: 8123
+      nativePort: 9000
+    auth:
+      user: eap
+      password: CHANGE_ME_clickhouse_password
+      database: langfuse
+    storage:
+      size: 200Gi
+      storageClass: ""
+    resources:
+      requests:
+        cpu: "500m"
+        memory: 4Gi
+      limits:
+        cpu: "2"
+        memory: 8Gi
+    persistence:
+      enabled: true
+
+identityLayer:
+  keycloak:
+    enabled: true
+    image:
+      repository: quay.io/keycloak/keycloak
+      tag: "26.0"
+    service:
+      port: 8080
+    auth:
+      adminUser: admin
+      adminPassword: CHANGE_ME_keycloak_admin_password
+      userAdminClientId: eap-gateway
+      userAdminClientSecret: CHANGE_ME_gateway_user_admin_secret
+    realm:
+      name: enterprise
+      # realm JSON 由 chart 内的 configmap 模板提供，生产建议改为外部托管
+      externalSecret: ""
+    # —— 控制台 OIDC 登录（授权码 + PKCE）——
+    # publicUrl 是浏览器能访问到的 Keycloak 地址（Ingress / 公网域名），
+    # 与容器内 service 地址不同，缺省会跳到不可达的地址
+    publicUrl: "https://sso.example.com"
+    webClientId: eap-webui
+    webScope: "openid profile email"
+    ingress:
+      enabled: false
+      host: sso.example.com
+    resources:
+      requests:
+        cpu: "500m"
+        memory: 2Gi
+      limits:
+        cpu: "2"
+        memory: 4Gi
+
+knowledgeLayer:
+  ragflow:
+    enabled: true
+    image:
+      repository: infiniflow/ragflow
+      tag: v0.22.1
+    service:
+      httpPort: 9380
+      webPort: 80
+    # —— 9.4 关键部署参数：文档引擎固定 infinity
+    docEngine: infinity
+    mysql:
+      dbName: rag_flow
+      user: root
+      password: CHANGE_ME_ragflow_mysql_password
+    storage:
+      size: 100Gi
+      storageClass: ""
+    resources:
+      requests:
+        cpu: "2"
+        memory: 8Gi
+      limits:
+        cpu: "4"
+        memory: 12Gi
+  infinity:
+    enabled: true
+    image:
+      repository: infiniflow/infinity
+      tag: v0.6.5
+    service:
+      clientPort: 23817
+      httpPort: 23820
+    storage:
+      size: 100Gi
+      storageClass: ""
+    resources:
+      requests:
+        cpu: "1"
+        memory: 4Gi
+      limits:
+        cpu: "4"
+        memory: 8Gi
+  tei:
+    enabled: true
+    image:
+      repository: ghcr.io/huggingface/text-embeddings-inference
+      tag: cpu-1.8
+    service:
+      port: 80
+    # —— 本地 Embedding（4.2：数据不出域、CPU 可跑）
+    model:
+      id: BAAI/bge-m3
+      # 离线环境填内网模型仓地址
+      endpoint: ""
+    storage:
+      size: 20Gi
+      storageClass: ""
+    resources:
+      requests:
+        cpu: "1"
+        memory: 4Gi
+      limits:
+        cpu: "4"
+        memory: 8Gi
+
+chatbiLayer:
+  dbgpt:
+    enabled: true
+    image:
+      repository: eosphorosai/dbgpt
+      tag: latest
+    service:
+      port: 8092
+    # —— 3.1「DB-GPT：以 MCP Server 方式暴露」
+    mcpCommand: "dbgpt mcp server --host 0.0.0.0 --port 8092"
+    resources:
+      requests:
+        cpu: "1"
+        memory: 4Gi
+      limits:
+        cpu: "4"
+        memory: 8Gi
+
+gatewayLayer:
+  gateway:
+    enabled: true
+    # —— 9.4：agentgateway 2 副本 + PDB
+    replicaCount: 2
+    image:
+      repository: eap/agentgateway
+      tag: "1.0.0"
+    service:
+      port: 8080
+    pdb:
+      enabled: true
+      minAvailable: 1
+    # —— 商业模型 API Key 只注入网关（8.5 凭证安全）
+    providerCredentials:
+      qwen: ""
+      deepseek: ""
+      zhipu: ""
+      openai: ""
+      minimax: ""
+    budget:
+      platformMonthlyUsd: 500
+      platformMonthlyTokens: 100000000
+    resources:
+      requests:
+        cpu: "500m"
+        memory: 1Gi
+      limits:
+        cpu: "2"
+        memory: 2Gi
+  mcpHub:
+    enabled: true
+    image:
+      repository: eap/mcp-hub
+      tag: "1.0.0"
+    service:
+      knowledgePort: 8091
+      chatbiPort: 8092
+      businessPort: 8093
+    resources:
+      requests:
+        cpu: "200m"
+        memory: 512Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+
+appLayer:
+  agentCore:
+    enabled: true
+    defaultModel: smart-model
+    image:
+      repository: eap/agent-core
+      tag: "1.0.0"
+    service:
+      port: 8090
+    # 会话运行与删除的互斥目前仅在单进程内成立；多副本前需实现共享协调。
+    replicaCount: 1
+    pdb:
+      enabled: false
+      minAvailable: 1
+    resources:
+      requests:
+        cpu: "500m"
+        memory: 1Gi
+      limits:
+        cpu: "2"
+        memory: 2Gi
+  webui:
+    enabled: true
+    image:
+      repository: eap/webui
+      tag: "1.0.0"
+    service:
+      port: 5173
+    replicaCount: 2
+    resources:
+      requests:
+        cpu: "100m"
+        memory: 128Mi
+      limits:
+        cpu: "500m"
+        memory: 512Mi
+
+observabilityLayer:
+  langfuse:
+    enabled: true
+    image:
+      repository: langfuse/langfuse
+      tag: 3.63.0
+    worker:
+      enabled: true
+      image:
+        repository: langfuse/langfuse-worker
+        tag: 3.63.0
+    service:
+      port: 3000
+    # —— 唯一观测组件（3.1）：不引入 Prometheus / Grafana / Loki
+    auth:
+      salt: CHANGE_ME_langfuse_salt
+      encryptionKey: CHANGE_ME_langfuse_encryption_key
+      nextauthSecret: CHANGE_ME_nextauth_secret
+      publicKey: CHANGE_ME_langfuse_public_key
+      secretKey: CHANGE_ME_langfuse_secret_key
+    resources:
+      requests:
+        cpu: "500m"
+        memory: 2Gi
+      limits:
+        cpu: "2"
+        memory: 4Gi
+
+securityLayer:
+  envoy:
+    enabled: true
+    image:
+      repository: envoyproxy/envoy
+      tag: v1.31-latest
+    service:
+      httpPort: 15000
+      httpsPort: 15001
+      adminPort: 9901
+    # —— 8.3 出网安全 / 9.3 网络要求：SNI 域名白名单
+    allowedHosts:
+      - api.openai.com
+      - dashscope.aliyuncs.com
+      - api.deepseek.com
+      - open.bigmodel.cn
+      - agent.minimaxi.com
+    # —— TLS 解密审计证书：生产请用企业 CA 签发的证书（K8s Secret）
+    tls:
+      existingSecret: ""
+      certFile: tls.crt
+      keyFile: tls.key
+    resources:
+      requests:
+        cpu: "200m"
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+
+# —— 离线镜像仓（3.1：Harbor 2.x，内网环境必需）
+harbor:
+  enabled: false
+  image:
+    repository: goharbor/harbor-core
+    tag: v2.10.0
+  registryImage:
+    repository: goharbor/harbor-registry
+    tag: v2.10.0
+  jobServiceImage:
+    repository: goharbor/harbor-jobservice
+    tag: v2.10.0
+  service:
+    port: 80
+  auth:
+    adminPassword: CHANGE_ME_harbor_admin_password
+  storage:
+    size: 200Gi
+    storageClass: ""
+
+# —— 单一前端入口（2.1 单一前端原则）
+ingress:
+  enabled: true
+  className: nginx
+  host: eap.example.com
+  annotations: {}
+  tls:
+    enabled: false
+    secretName: eap-ingress-tls
+  paths:
+    api: /api
+    gateway: /v1
+
+# —— 密钥管理（3.2：不引入 Vault，使用 K8s Secret + 季度人工轮换）
+secrets:
+  # 已存在的 Secret 名称。分 namespace 部署时，需在 support / app / data
+  # 中分别准备同名 Secret，并包含各层引用的键；留空则使用 chart 内置占位 Secret。
+  existingSecret: ""
+  create: true
+
+# —— Pod 安全上下文基线
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# —— 调度
+nodeSelector: {}
+tolerations: []
+affinity: {}
+priorityClassName: ""

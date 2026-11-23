@@ -1,0 +1,13 @@
+{{/* ===================================================================
+  分层 namespace（见 9.2 部署形态：生产 K8s + Helm，组件按层分 namespace）
+  =================================================================== */}}
+{{- range $ns := list .Values.namespaces.support .Values.namespaces.app .Values.namespaces.data }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $ns }}
+  labels:
+    {{- include "eap.labels" $ | nindent 4 }}
+    app.kubernetes.io/part-of: enterprise-ai-agent-platform
+{{- end }}

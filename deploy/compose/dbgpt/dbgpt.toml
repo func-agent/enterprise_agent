@@ -1,0 +1,85 @@
+# =============================================================================
+# DB-GPT 0.8.3 服务配置
+#
+# 依据《建设方案》3.1「DB-GPT 以 MCP Server 暴露」、6.1 ChatBI：
+#   · 元数据落在平台 PostgreSQL（避免再引入一套存储）
+#   · LLM 指向 agentgateway 的 OpenAI 兼容端口（不直连商业 API，见 4.4 Key 治理）
+#   · Embedding 指向本地 TEI（数据不出域）
+#
+# 说明：DB-GPT 官方镜像未提供 `dbgpt mcp server` 子命令 —— 实测核实 0.9.x 从未发布：
+#      Docker Hub 共 56 个标签最高 v0.8.3，PyPI 最高 0.8.2，GitHub（eosphoros-ai/DB-GPT）
+#      共 56 个 tag 最高 v0.8.3 且 main 分支版本号仍为 0.8.3、CLI 无 mcp 子命令。
+#      DB-GPT 的 MCP 方向是**客户端**（connector）。因此本实例以 **模型 API Server** 形态运行，
+#      由平台的 MCP Hub 承担 MCP Server 角色并对接 DB-GPT（见 docs/component-mapping.md）。
+# =============================================================================
+
+[system]
+language = "${env:DBGPT_LANG:-zh}"
+# 对外暴露的 API Key（调用 DB-GPT OpenAI 兼容端口时使用）
+api_keys = ["${env:DBGPT_API_KEY:-eap-dbgpt-local-key}"]
+encrypt_key = "${env:DBGPT_ENCRYPT_KEY:-eap-local-dbgpt-encrypt-2026}"
+
+# —— 模型 API Server ——
+# 配置前缀是 service.model.api（见 dbgpt/model/cluster/apiserver/api.py:1003
+# 的 cfg.parse_config(ModelAPIServerParameters, prefix="service.model.api")），
+# 不是 service.web —— 写错前缀会被静默忽略，端口退回默认 8100。
+[service.model.api]
+host = "0.0.0.0"
+port = 8092
+# 模型控制器地址；DB-GPT 以 controller + worker + apiserver 三件套运行时，
+# apiserver 通过它注册/发现模型。本机单容器内跑 controller，故用环回地址。
+controller_addr = "${env:DBGPT_CONTROLLER_ADDR:-http://127.0.0.1:8000}"
+api_keys = "${env:DBGPT_API_KEY:-eap-dbgpt-local-key}"
+
+# —— 模型控制器（与 apiserver 同容器，供其发现模型）——
+[service.model.controller]
+host = "127.0.0.1"
+port = 8000
+
+# —— 模型 worker（真正加载模型 / 转发推理请求）——
+[service.model.worker]
+host = "127.0.0.1"
+port = 8001
+# 本机 worker 与 controller 同容器，走环回即可
+controller_addr = "${env:DBGPT_CONTROLLER_ADDR:-http://127.0.0.1:8000}"
+
+# —— Web Server（DB-GPT 原生形态：datasource / Text2SQL / awesomes）——
+# 前缀是 service.web（与 apiserver 的 service.model.api 不是同一套）。
+# 容器内端口 8093，避开 apiserver 的 8092；宿主映射见 docker-compose.heavy.yml。
+# controller_addr 指向同容器的 controller，让 webserver 复用已注册的模型，
+# 而不是自己再加载一份。
+[service.web]
+host = "0.0.0.0"
+port = "${env:DBGPT_WEB_PORT:-8093}"
+controller_addr = "${env:DBGPT_CONTROLLER_ADDR:-http://127.0.0.1:8000}"
+
+# —— 元数据库：平台 PostgreSQL 里的 dbgpt 库（见 deploy/compose/postgres/init）——
+# type 必须是 "postgresql"（不是 "postgres"）—— 0.8.3 的类型注册表里没有 postgres，
+# 写错会抛 "Unknown type value: postgres" 直接启动失败。
+[service.web.database]
+type = "postgresql"
+host = "${env:DBGPT_DB_HOST:-postgres}"
+port = "${env:DBGPT_DB_PORT:-5432}"
+user = "${env:DBGPT_DB_USER:-eap}"
+password = "${env:DBGPT_DB_PASSWORD:-eap-local-pg-2026}"
+database = "${env:DBGPT_DB_NAME:-dbgpt}"
+
+# —— 向量存储：本地持久化目录（不引入额外组件）——
+[rag.storage]
+[rag.storage.vector]
+type = "chroma"
+persist_path = "${env:DBGPT_RAG_PATH:-/app/data/rag}"
+
+# —— 模型接入：全部经 agentgateway，不直连商业 API ——
+#
+# 注意：DB-GPT cluster 模式下 worker 只允许托管 **一个** 模型配置
+#（见 dbgpt/model/cluster/worker/manager.py 的
+#  "Only one model config is supported when running worker in cluster mode"），
+# 因此这里只声明 LLM；平台侧的嵌入能力由 agentgateway 的 /v1/embeddings
+# （→ 本地 TEI）统一提供，不在此重复声明。
+[models]
+[[models.llms]]
+name = "${env:LLM_MODEL_NAME:-smart-model}"
+provider = "${env:LLM_MODEL_PROVIDER:-proxy/openai}"
+api_base = "${env:OPENAI_API_BASE:-http://host.docker.internal:8080/v1}"
+api_key = "${env:OPENAI_API_KEY:-eap-dbgpt-local-key}"

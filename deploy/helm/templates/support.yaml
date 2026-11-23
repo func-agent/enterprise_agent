@@ -1,0 +1,487 @@
+{{/* ===================================================================
+  支撑层：PostgreSQL 16 / Redis 7 / MinIO / ClickHouse v3
+  见 3.1 存储组件；MinIO 开启版本化（见 9.4 关键部署参数）
+  =================================================================== */}}
+{{- if .Values.supportLayer.postgres.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "eap.fullname" . }}-postgres
+  namespace: {{ include "eap.ns.support" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "eap.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+  ports:
+    - name: postgres
+      port: {{ .Values.supportLayer.postgres.service.port }}
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "eap.fullname" . }}-postgres
+  namespace: {{ include "eap.ns.support" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+spec:
+  serviceName: {{ include "eap.fullname" . }}-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "eap.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: postgres
+  template:
+    metadata:
+      labels:
+        {{- include "eap.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: postgres
+    spec:
+      {{- include "eap.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: postgres
+          image: {{ include "eap.image" (dict "root" . "repository" .Values.supportLayer.postgres.image.repository "tag" .Values.supportLayer.postgres.image.tag) }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: postgres
+              containerPort: {{ .Values.supportLayer.postgres.service.port }}
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: postgres-username
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: postgres-password
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: postgres-database
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "{{ .Values.supportLayer.postgres.auth.username }}"]
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "{{ .Values.supportLayer.postgres.auth.username }}"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.supportLayer.postgres.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      {{- if not .Values.supportLayer.postgres.persistence.enabled }}
+      volumes:
+        - name: data
+          emptyDir: {}
+      {{- end }}
+  {{- if .Values.supportLayer.postgres.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- include "eap.storageClass" (dict "root" $ "storageClass" .Values.supportLayer.postgres.storage.storageClass) | nindent 8 }}
+        resources:
+          requests:
+            storage: {{ .Values.supportLayer.postgres.storage.size }}
+  {{- end }}
+{{- end }}
+
+{{- if .Values.supportLayer.redis.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "eap.fullname" . }}-redis
+  namespace: {{ include "eap.ns.support" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "eap.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+  ports:
+    - name: redis
+      port: {{ .Values.supportLayer.redis.service.port }}
+      targetPort: redis
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "eap.fullname" . }}-redis
+  namespace: {{ include "eap.ns.support" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+spec:
+  serviceName: {{ include "eap.fullname" . }}-redis
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "eap.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: redis
+  template:
+    metadata:
+      labels:
+        {{- include "eap.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: redis
+    spec:
+      {{- include "eap.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: redis
+          image: {{ include "eap.image" (dict "root" . "repository" .Values.supportLayer.redis.image.repository "tag" .Values.supportLayer.redis.image.tag) }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - redis-server
+            - --appendonly
+            - "yes"
+            - --requirepass
+            - $(REDIS_PASSWORD)
+            - --maxmemory-policy
+            - allkeys-lru
+          ports:
+            - name: redis
+              containerPort: {{ .Values.supportLayer.redis.service.port }}
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: redis-password
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "redis-cli -a \"$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+            initialDelaySeconds: 15
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "redis-cli -a \"$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.supportLayer.redis.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      {{- if not .Values.supportLayer.redis.persistence.enabled }}
+      volumes:
+        - name: data
+          emptyDir: {}
+      {{- end }}
+  {{- if .Values.supportLayer.redis.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- include "eap.storageClass" (dict "root" $ "storageClass" .Values.supportLayer.redis.storage.storageClass) | nindent 8 }}
+        resources:
+          requests:
+            storage: {{ .Values.supportLayer.redis.storage.size }}
+  {{- end }}
+{{- end }}
+
+{{- if .Values.supportLayer.minio.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "eap.fullname" . }}-minio
+  namespace: {{ include "eap.ns.support" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "eap.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+  ports:
+    - name: api
+      port: {{ .Values.supportLayer.minio.service.apiPort }}
+      targetPort: api
+    - name: console
+      port: {{ .Values.supportLayer.minio.service.consolePort }}
+      targetPort: console
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "eap.fullname" . }}-minio
+  namespace: {{ include "eap.ns.support" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+spec:
+  serviceName: {{ include "eap.fullname" . }}-minio
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "eap.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: minio
+  template:
+    metadata:
+      labels:
+        {{- include "eap.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: minio
+    spec:
+      {{- include "eap.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: minio
+          image: {{ include "eap.image" (dict "root" . "repository" .Values.supportLayer.minio.image.repository "tag" .Values.supportLayer.minio.image.tag) }}
+          imagePullPolicy: IfNotPresent
+          args: ["server", "/data", "--console-address", ":{{ .Values.supportLayer.minio.service.consolePort }}"]
+          ports:
+            - name: api
+              containerPort: {{ .Values.supportLayer.minio.service.apiPort }}
+            - name: console
+              containerPort: {{ .Values.supportLayer.minio.service.consolePort }}
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: minio-root-user
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: minio-root-password
+          livenessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: api
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: api
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.supportLayer.minio.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      {{- if not .Values.supportLayer.minio.persistence.enabled }}
+      volumes:
+        - name: data
+          emptyDir: {}
+      {{- end }}
+  {{- if .Values.supportLayer.minio.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- include "eap.storageClass" (dict "root" $ "storageClass" .Values.supportLayer.minio.storage.storageClass) | nindent 8 }}
+        resources:
+          requests:
+            storage: {{ .Values.supportLayer.minio.storage.size }}
+  {{- end }}
+---
+# 桶初始化 + 版本化开启（见 3.1 / 9.4「MinIO：开启版本化」）
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "eap.fullname" . }}-minio-init
+  namespace: {{ include "eap.ns.support" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio-init
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        {{- include "eap.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: minio-init
+    spec:
+      restartPolicy: OnFailure
+      {{- include "eap.imagePullSecrets" . | nindent 6 }}
+      containers:
+        - name: mc
+          image: {{ include "eap.image" (dict "root" . "repository" "quay.io/minio/mc" "tag" "RELEASE.2025-04-16T18-13-26Z") }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: minio-root-user
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: minio-root-password
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              until mc alias set eap http://{{ include "eap.fullname" . }}-minio.{{ include "eap.ns.support" . }}.svc:{{ .Values.supportLayer.minio.service.apiPort }} "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"; do sleep 5; done
+              {{- range .Values.supportLayer.minio.buckets }}
+              mc mb --ignore-existing eap/{{ .name }}
+              {{- if .versioning }}
+              mc version enable eap/{{ .name }}
+              {{- end }}
+              {{- end }}
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+{{- end }}
+
+{{- if .Values.supportLayer.clickhouse.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "eap.fullname" . }}-clickhouse
+  namespace: {{ include "eap.ns.support" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: clickhouse
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "eap.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: clickhouse
+  ports:
+    - name: http
+      port: {{ .Values.supportLayer.clickhouse.service.httpPort }}
+      targetPort: http
+    - name: native
+      port: {{ .Values.supportLayer.clickhouse.service.nativePort }}
+      targetPort: native
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "eap.fullname" . }}-clickhouse
+  namespace: {{ include "eap.ns.support" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: clickhouse
+spec:
+  serviceName: {{ include "eap.fullname" . }}-clickhouse
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "eap.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: clickhouse
+  template:
+    metadata:
+      labels:
+        {{- include "eap.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: clickhouse
+    spec:
+      {{- include "eap.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: clickhouse
+          image: {{ include "eap.image" (dict "root" . "repository" .Values.supportLayer.clickhouse.image.repository "tag" .Values.supportLayer.clickhouse.image.tag) }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: {{ .Values.supportLayer.clickhouse.service.httpPort }}
+            - name: native
+              containerPort: {{ .Values.supportLayer.clickhouse.service.nativePort }}
+          env:
+            - name: CLICKHOUSE_DB
+              value: {{ .Values.supportLayer.clickhouse.auth.database | quote }}
+            - name: CLICKHOUSE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: clickhouse-user
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: clickhouse-password
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.supportLayer.clickhouse.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/clickhouse
+      {{- if not .Values.supportLayer.clickhouse.persistence.enabled }}
+      volumes:
+        - name: data
+          emptyDir: {}
+      {{- end }}
+  {{- if .Values.supportLayer.clickhouse.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- include "eap.storageClass" (dict "root" $ "storageClass" .Values.supportLayer.clickhouse.storage.storageClass) | nindent 8 }}
+        resources:
+          requests:
+            storage: {{ .Values.supportLayer.clickhouse.storage.size }}
+  {{- end }}
+{{- end }}

@@ -1,0 +1,950 @@
+# =============================================================================
+# 企业级 AI Agent 平台 —— POC 单机容器编排（Docker Compose）
+#
+# 依据《企业级 AI Agent 平台建设方案》：
+#   3.1 组件总览        —— 组件与版本清单（本文件覆盖全部 P0 组件）
+#   8.3 出网安全        —— 唯一出口 + SNI 白名单 + TLS 解密审计
+#   8.5 凭证安全        —— 商业模型 API Key 只在 agentgateway 进程内可见
+#   9.1 硬件配置        —— POC 单机 16C/32G/500G SSD
+#   9.2 部署形态        —— POC：单机 Docker Compose，一天拉起
+#   9.3 网络要求        —— 禁止业务组件直连商业 API，必须过网关 + 出网代理
+#   9.4 关键部署参数    —— DOC_ENGINE=infinity / MinIO 版本化 / 网关多副本思路
+#
+# 网络分层（见 9.3）：
+#   eap_support  internal —— PG / Redis / MinIO / ClickHouse / Keycloak / Langfuse
+#   eap_data     internal —— RAGFlow / Infinity / TEI / DB-GPT
+#   eap_app      internal —— Web UI / AgentScope / agentgateway / MCP Hub
+#   eap_egress   默认路由  —— 仅 envoy（唯一允许出网的容器）
+#   商业 API 调用链：agentgateway → envoy(:15000 / :15001) → 外网
+#
+# 约定：
+#   - 不写死真实密钥，一律 ${VAR:-占位符}，占位符以 CHANGE_ME 开头（见 .env.example）
+#   - 所有服务 restart: unless-stopped + 资源限制 + json-file 日志轮转
+#   - postgres / redis / minio 必须 healthy，依赖方用 condition: service_healthy
+# =============================================================================
+name: eap
+
+# ---- 公共片段：日志轮转 + 自动重启 + 禁止提权 -------------------------------
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-common: &common
+  restart: unless-stopped
+  logging: *default-logging
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  # ===========================================================================
+  # 一、支撑层（见 3.1 存储组件：PostgreSQL 16 / Redis 7 / MinIO）
+  # ===========================================================================
+
+  postgres:
+    <<: *common
+    image: ${POSTGRES_IMAGE:-postgres:16}
+    container_name: eap-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-eap}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-CHANGE_ME_postgres_password}
+      POSTGRES_DB: ${POSTGRES_DB:-eap}
+      PGDATA: /var/lib/postgresql/data/pgdata
+      TZ: ${TZ:-Asia/Shanghai}
+    command:
+      - postgres
+      - -c
+      - max_connections=${POSTGRES_MAX_CONNECTIONS:-200}
+      - -c
+      - shared_buffers=${POSTGRES_SHARED_BUFFERS:-256MB}
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    networks:
+      - eap_support
+      - eap_data
+      - eap_ops
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-eap} -d ${POSTGRES_DB:-eap}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    mem_limit: ${POSTGRES_MEM_LIMIT:-2g}
+    cpus: ${POSTGRES_CPUS:-1.0}
+
+  redis:
+    <<: *common
+    image: ${REDIS_IMAGE:-redis:7}
+    container_name: eap-redis
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${REDIS_PASSWORD:-CHANGE_ME_redis_password}
+      - --maxmemory
+      - ${REDIS_MAXMEMORY:-1gb}
+      - --maxmemory-policy
+      - allkeys-lru
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-CHANGE_ME_redis_password}
+    volumes:
+      - redis-data:/data
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    networks:
+      - eap_support
+      - eap_data
+      - eap_ops
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    mem_limit: ${REDIS_MEM_LIMIT:-1g}
+    cpus: ${REDIS_CPUS:-0.5}
+
+  minio:
+    <<: *common
+    image: ${MINIO_IMAGE:-quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z}
+    container_name: eap-minio
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-eapadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-CHANGE_ME_minio_password}
+    volumes:
+      - minio-data:/data
+    ports:
+      - "127.0.0.1:${MINIO_API_PORT:-9000}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:9001"
+    networks:
+      - eap_support
+      - eap_data
+      - eap_ops
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    mem_limit: ${MINIO_MEM_LIMIT:-2g}
+    cpus: ${MINIO_CPUS:-1.0}
+
+  # 审计归档桶 + 开启版本化（见 3.1「MinIO 开启版本化」、9.4「MinIO：开启版本化」）
+  minio-init:
+    image: ${MINIO_MC_IMAGE:-quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z}
+    container_name: eap-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-eapadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-CHANGE_ME_minio_password}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        mc alias set eap http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
+        mc mb --ignore-existing eap/${MINIO_BUCKET:-eap-audit}
+        mc mb --ignore-existing eap/${LANGFUSE_BUCKET:-langfuse}
+        mc mb --ignore-existing eap/${RAGFLOW_BUCKET:-ragflow}
+        mc version enable eap/${MINIO_BUCKET:-eap-audit}
+        mc version enable eap/${LANGFUSE_BUCKET:-langfuse}
+        mc version enable eap/${RAGFLOW_BUCKET:-ragflow}
+        echo "MinIO 桶已就绪：${MINIO_BUCKET:-eap-audit}（版本化已开启）"
+    networks:
+      - eap_data
+      - eap_ops
+    restart: "no"
+    mem_limit: ${MINIO_INIT_MEM_LIMIT:-256m}
+    cpus: ${MINIO_INIT_CPUS:-0.3}
+
+  clickhouse:
+    <<: *common
+    image: ${CLICKHOUSE_IMAGE:-clickhouse/clickhouse-server:24.8-alpine}
+    container_name: eap-clickhouse
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-langfuse}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-eap}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-CHANGE_ME_clickhouse_password}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    ports:
+      - "127.0.0.1:${CLICKHOUSE_HTTP_PORT:-8123}:8123"
+      - "127.0.0.1:${CLICKHOUSE_NATIVE_PORT:-9000}:9000"
+    networks:
+      - eap_support
+      - eap_ops
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8123/ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    mem_limit: ${CLICKHOUSE_MEM_LIMIT:-4g}
+    cpus: ${CLICKHOUSE_CPUS:-1.5}
+
+  # RAGFlow 的元数据库（RAGFlow v0.22 自身依赖 MySQL，与平台元数据 PostgreSQL 隔离）
+  mysql:
+    <<: *common
+    image: ${MYSQL_IMAGE:-mysql:8.0.39}
+    container_name: eap-mysql
+    command:
+      - --max_connections=1000
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+    environment:
+      MYSQL_ROOT_PASSWORD: ${RAGFLOW_MYSQL_PASSWORD:-CHANGE_ME_ragflow_mysql_password}
+      MYSQL_DATABASE: ${RAGFLOW_MYSQL_DBNAME:-rag_flow}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - mysql-data:/var/lib/mysql
+    networks:
+      - eap_data
+      - eap_ops
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-uroot", "-p${RAGFLOW_MYSQL_PASSWORD:-CHANGE_ME_ragflow_mysql_password}"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+    mem_limit: ${MYSQL_MEM_LIMIT:-2g}
+    cpus: ${MYSQL_CPUS:-1.0}
+
+  # ===========================================================================
+  # 二、观测层：Langfuse v3 + ClickHouse（见 3.1「Langfuse 自托管 + ClickHouse v3」）
+  # ===========================================================================
+
+  langfuse-web:
+    <<: *common
+    image: ${LANGFUSE_IMAGE:-langfuse/langfuse:3.63.0}
+    container_name: eap-langfuse-web
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      # —— ClickHouse
+      LANGFUSE_INIT_CLICKHOUSE: "true"
+      LANGFUSE_CLICKHOUSE_MIGRATION_URL: clickhouse://${CLICKHOUSE_USER:-eap}:${CLICKHOUSE_PASSWORD:-CHANGE_ME_clickhouse_password}@clickhouse:9000/${CLICKHOUSE_DB:-langfuse}
+      CLICKHOUSE_MIGRATION_URL: clickhouse://${CLICKHOUSE_USER:-eap}:${CLICKHOUSE_PASSWORD:-CHANGE_ME_clickhouse_password}@clickhouse:9000/${CLICKHOUSE_DB:-langfuse}
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-eap}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-CHANGE_ME_clickhouse_password}
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      CLICKHOUSE_DB: ${LANGFUSE_CLICKHOUSE_DB:-langfuse}
+      LANGFUSE_CLICKHOUSE_URL: http://clickhouse:8123
+      LANGFUSE_CLICKHOUSE_USER: ${CLICKHOUSE_USER:-eap}
+      LANGFUSE_CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-CHANGE_ME_clickhouse_password}
+      LANGFUSE_CLICKHOUSE_CLUSTER_ENABLED: "false"
+      # —— 平台元数据库
+      LANGFUSE_DATABASE_HOST: postgres
+      LANGFUSE_DATABASE_PORT: "5432"
+      LANGFUSE_DATABASE_USER: ${POSTGRES_USER:-eap}
+      LANGFUSE_DATABASE_PASSWORD: ${POSTGRES_PASSWORD:-CHANGE_ME_postgres_password}
+      LANGFUSE_DATABASE_DATABASE: ${LANGFUSE_DATABASE:-langfuse}
+      LANGFUSE_DATABASE_URL: postgres://${POSTGRES_USER:-eap}:${POSTGRES_PASSWORD:-CHANGE_ME_postgres_password}@postgres:5432/${LANGFUSE_DATABASE:-langfuse}
+      DATABASE_URL: postgres://${POSTGRES_USER:-eap}:${POSTGRES_PASSWORD:-CHANGE_ME_postgres_password}@postgres:5432/${LANGFUSE_DATABASE:-langfuse}
+      # —— Redis
+      LANGFUSE_REDIS_HOST: redis
+      LANGFUSE_REDIS_PORT: "6379"
+      LANGFUSE_REDIS_AUTH: ${REDIS_PASSWORD:-CHANGE_ME_redis_password}
+      LANGFUSE_REDIS_TLS_ENABLED: "false"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: ${REDIS_PASSWORD:-CHANGE_ME_redis_password}
+      # —— 加密盐值 / 会话密钥（生产必须替换，见 8.5 凭证安全）
+      LANGFUSE_SALT: ${LANGFUSE_SALT:-CHANGE_ME_langfuse_salt}
+      SALT: ${LANGFUSE_SALT:-CHANGE_ME_langfuse_salt}
+      LANGFUSE_ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-CHANGE_ME_langfuse_encryption_key}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-CHANGE_ME_langfuse_encryption_key}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-CHANGE_ME_nextauth_secret}
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-http://127.0.0.1:3000}
+      HOSTNAME: 0.0.0.0
+      # —— 对象存储（复用平台 MinIO）
+      LANGFUSE_S3_EVENT_UPLOAD_ENABLED: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: ${LANGFUSE_BUCKET:-langfuse}
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: ${MINIO_REGION:-us-east-1}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-eapadmin}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-CHANGE_ME_minio_password}
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: "events/"
+      LANGFUSE_S3_BATCH_EXPORT_ENABLED: "true"
+      LANGFUSE_S3_BATCH_EXPORT_BUCKET: ${LANGFUSE_BUCKET:-langfuse}
+      LANGFUSE_S3_BATCH_EXPORT_REGION: ${MINIO_REGION:-us-east-1}
+      LANGFUSE_S3_BATCH_EXPORT_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_BATCH_EXPORT_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-eapadmin}
+      LANGFUSE_S3_BATCH_EXPORT_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-CHANGE_ME_minio_password}
+      LANGFUSE_S3_BATCH_EXPORT_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_BATCH_EXPORT_PREFIX: "batch-export/"
+      # —— 其它
+      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "false"
+      LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID:-eap-org}
+      LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME:-企业级 AI Agent 平台}
+      LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID:-eap-project}
+      LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_INIT_PROJECT_NAME:-EAP Platform}
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-pk-lf-local-eap}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-sk-lf-local-eap-2026}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-admin@example.com}
+      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME:-平台管理员}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-EapLangfuse@2026}
+      TELEMETRY_ENABLED: "false"
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "127.0.0.1:${LANGFUSE_PORT:-3000}:3000"
+    networks:
+      - eap_support
+      - eap_data
+      - eap_ops
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/public/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 20s
+      timeout: 5s
+      retries: 12
+      start_period: 90s
+    mem_limit: ${LANGFUSE_MEM_LIMIT:-2g}
+    cpus: ${LANGFUSE_CPUS:-1.0}
+
+  langfuse-worker:
+    <<: *common
+    image: ${LANGFUSE_WORKER_IMAGE:-langfuse/langfuse-worker:3.63.0}
+    container_name: eap-langfuse-worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      langfuse-web:
+        condition: service_started
+    environment:
+      LANGFUSE_INIT_CLICKHOUSE: "false"
+      LANGFUSE_CLICKHOUSE_MIGRATION_URL: clickhouse://${CLICKHOUSE_USER:-eap}:${CLICKHOUSE_PASSWORD:-CHANGE_ME_clickhouse_password}@clickhouse:9000/${CLICKHOUSE_DB:-langfuse}
+      CLICKHOUSE_MIGRATION_URL: clickhouse://${CLICKHOUSE_USER:-eap}:${CLICKHOUSE_PASSWORD:-CHANGE_ME_clickhouse_password}@clickhouse:9000/${CLICKHOUSE_DB:-langfuse}
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-eap}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-CHANGE_ME_clickhouse_password}
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      CLICKHOUSE_DB: ${LANGFUSE_CLICKHOUSE_DB:-langfuse}
+      LANGFUSE_CLICKHOUSE_URL: http://clickhouse:8123
+      LANGFUSE_CLICKHOUSE_USER: ${CLICKHOUSE_USER:-eap}
+      LANGFUSE_CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-CHANGE_ME_clickhouse_password}
+      LANGFUSE_CLICKHOUSE_CLUSTER_ENABLED: "false"
+      LANGFUSE_DATABASE_HOST: postgres
+      LANGFUSE_DATABASE_PORT: "5432"
+      LANGFUSE_DATABASE_USER: ${POSTGRES_USER:-eap}
+      LANGFUSE_DATABASE_PASSWORD: ${POSTGRES_PASSWORD:-CHANGE_ME_postgres_password}
+      LANGFUSE_DATABASE_DATABASE: ${LANGFUSE_DATABASE:-langfuse}
+      LANGFUSE_DATABASE_URL: postgres://${POSTGRES_USER:-eap}:${POSTGRES_PASSWORD:-CHANGE_ME_postgres_password}@postgres:5432/${LANGFUSE_DATABASE:-langfuse}
+      DATABASE_URL: postgres://${POSTGRES_USER:-eap}:${POSTGRES_PASSWORD:-CHANGE_ME_postgres_password}@postgres:5432/${LANGFUSE_DATABASE:-langfuse}
+      LANGFUSE_REDIS_HOST: redis
+      LANGFUSE_REDIS_PORT: "6379"
+      LANGFUSE_REDIS_AUTH: ${REDIS_PASSWORD:-CHANGE_ME_redis_password}
+      LANGFUSE_REDIS_TLS_ENABLED: "false"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: ${REDIS_PASSWORD:-CHANGE_ME_redis_password}
+      LANGFUSE_SALT: ${LANGFUSE_SALT:-CHANGE_ME_langfuse_salt}
+      SALT: ${LANGFUSE_SALT:-CHANGE_ME_langfuse_salt}
+      LANGFUSE_ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-CHANGE_ME_langfuse_encryption_key}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-CHANGE_ME_langfuse_encryption_key}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-CHANGE_ME_nextauth_secret}
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-http://127.0.0.1:3000}
+      HOSTNAME: 0.0.0.0
+      LANGFUSE_S3_EVENT_UPLOAD_ENABLED: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: ${LANGFUSE_BUCKET:-langfuse}
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: ${MINIO_REGION:-us-east-1}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-eapadmin}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-CHANGE_ME_minio_password}
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: "events/"
+      LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID:-eap-org}
+      LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME:-企业级 AI Agent 平台}
+      LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID:-eap-project}
+      LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_INIT_PROJECT_NAME:-EAP Platform}
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-pk-lf-local-eap}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-sk-lf-local-eap-2026}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-admin@example.com}
+      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME:-平台管理员}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-EapLangfuse@2026}
+      TELEMETRY_ENABLED: "false"
+      TZ: ${TZ:-Asia/Shanghai}
+    networks:
+      - eap_support
+      - eap_data
+      - eap_ops
+    mem_limit: ${LANGFUSE_WORKER_MEM_LIMIT:-1g}
+    cpus: ${LANGFUSE_WORKER_CPUS:-0.5}
+
+  # ===========================================================================
+  # 三、身份层：Keycloak 26（见 3.1 身份组件、7.1 身份与多租户）
+  # ===========================================================================
+
+  keycloak:
+    <<: *common
+    image: ${KEYCLOAK_IMAGE:-quay.io/keycloak/keycloak:26.0}
+    container_name: eap-keycloak
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_BOOTSTRAP_ADMIN:-eap-bootstrap}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-CHANGE_ME_keycloak_admin_password}
+      KC_HTTP_ENABLED: "true"
+      KC_HTTP_PORT: "8080"
+      KC_HOSTNAME_STRICT: "false"
+      KC_PROXY_HEADERS: "xforwarded"
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
+      # 公网 Web 控制台入口。realm-eap.json 的 redirect URI / webOrigin 用
+      # ${EAP_PUBLIC_WEB_ORIGIN} 占位，导入时由本变量替换。
+      # 注意：变量缺失时 Keycloak 会把占位符原样写入且不告警，
+      # 因此 scripts/start-heavy.sh 会在启动前强制校验，未设置直接拒绝启动。
+      EAP_PUBLIC_WEB_ORIGIN: ${EAP_PUBLIC_WEB_ORIGIN:-http://127.0.0.1:5173}
+      # RAGFlow SSO 回调入口（realm 里 eap-ragflow 客户端的 redirect URI 用
+      # ${EAP_PUBLIC_RAGFLOW_ORIGIN} 占位）。默认值只适用于本机调试；
+      # 对公网开放 RAGFlow 时必须改成用户浏览器实际访问的地址，否则
+      # Keycloak 会因 redirect_uri 不匹配而拒绝回调（error=invalid_redirect_uri）。
+      EAP_PUBLIC_RAGFLOW_ORIGIN: ${EAP_PUBLIC_RAGFLOW_ORIGIN:-http://127.0.0.1:8095}
+      # 首次导入 eap-ragflow 客户端时使用同一份密钥；已有 realm 不会被再次导入覆盖。
+      RAGFLOW_OAUTH_CLIENT_SECRET: ${RAGFLOW_OAUTH_CLIENT_SECRET:-eap-ragflow-local-secret-2026}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - ./keycloak/realm-eap.json:/opt/keycloak/data/import/realm-eap.json:ro
+      - ./keycloak/themes:/opt/keycloak/themes:ro
+      - keycloak-data:/opt/keycloak/data
+    ports:
+      - "127.0.0.1:${KEYCLOAK_PORT:-8081}:8080"
+    networks:
+      - eap_support
+      - eap_app
+      - eap_ops
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "exec 3<>/dev/tcp/127.0.0.1/9000 && echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && cat <&3 | grep -q UP"
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    mem_limit: ${KEYCLOAK_MEM_LIMIT:-2g}
+    cpus: ${KEYCLOAK_CPUS:-1.0}
+
+  # ===========================================================================
+  # 四、知识层：RAGFlow + Infinity + TEI（见 4.2、9.4「DOC_ENGINE=infinity」）
+  # ===========================================================================
+
+  infinity:
+    <<: *common
+    # 注意：Infinity 官方要求 x86_64 + AVX2。本机（Xeon E5-2697 v2）仅有 AVX，
+    # 默认镜像会 SIGILL（invalid opcode）。改用官方 x64 微架构分级标签：
+    #   v2 = SSE4.2 基线（通用） / v3 = AVX2 / v4 = AVX-512
+    # 换到支持 AVX2 的机器可改用 v0.7.5-x64-v3。
+    image: ${INFINITY_IMAGE:-infiniflow/infinity:v0.7.5-x64-v2}
+    container_name: eap-infinity
+    # 检索引擎：BM25 + 稠密/稀疏向量内核级融合，替代 ES（不需 vm.max_map_count / IK 插件）
+    command: ["-f", "/infinity_conf.toml"]
+    volumes:
+      - ./ragflow/infinity_conf.toml:/infinity_conf.toml:ro
+      - infinity-data:/var/infinity
+    ports:
+      - "127.0.0.1:${INFINITY_CLIENT_PORT:-23817}:23817"
+      - "127.0.0.1:${INFINITY_HTTP_PORT:-23820}:23820"
+    networks:
+      - eap_data
+      - eap_ops
+    ulimits:
+      nofile:
+        soft: 500000
+        hard: 500000
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:23820/admin/node/current"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    mem_limit: ${INFINITY_MEM_LIMIT:-4g}
+    cpus: ${INFINITY_CPUS:-2.0}
+
+  tei:
+    <<: *common
+    image: ${TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cpu-1.8}
+    container_name: eap-tei
+    # 本地 Embedding：BGE-M3（数据不出域，CPU 即可，见 4.2 关键决策）
+    # 离线环境：把模型目录挂到 /data 并设置 TEI_MODEL_PATH=/data/<模型目录>
+    command:
+      - --model-id
+      - ${TEI_MODEL:-BAAI/bge-m3}
+      - --auto-truncate
+      - --port
+      - "80"
+    environment:
+      HF_HOME: /data
+      HUGGINGFACE_HUB_CACHE: /data/hub
+      TEI_MODEL_PATH: ${TEI_MODEL_PATH:-}
+    volumes:
+      - tei-cache:/data
+    ports:
+      - "127.0.0.1:${TEI_PORT:-6380}:80"
+    networks:
+      - eap_data
+      - eap_ops
+    mem_limit: ${TEI_MEM_LIMIT:-4g}
+    cpus: ${TEI_CPUS:-2.0}
+
+  ragflow:
+    <<: *common
+    image: ${RAGFLOW_IMAGE:-infiniflow/ragflow:v0.22.1}
+    container_name: eap-ragflow
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      infinity:
+        condition: service_healthy
+    environment:
+      # —— 关键部署参数（见 9.4）：文档引擎固定为 infinity，不再引入 ES
+      DOC_ENGINE: infinity
+      COMPOSE_PROFILES: "infinity"
+      TZ: ${TZ:-Asia/Shanghai}
+      # —— Infinity（Thrift 客户端端口 23817）
+      INFINITY_HOST: infinity
+      INFINITY_THRIFT_PORT: "23817"
+      INFINITY_HTTP_PORT: "23820"
+      INFINITY_PSQL_PORT: "5432"
+      # —— MySQL（仅 RAGFlow 自身元数据）
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_DBNAME: ${RAGFLOW_MYSQL_DBNAME:-rag_flow}
+      MYSQL_USER: root
+      MYSQL_PASSWORD: ${RAGFLOW_MYSQL_PASSWORD:-CHANGE_ME_ragflow_mysql_password}
+      MYSQL_MAX_PACKET: "1073741824"
+      # —— Redis
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-CHANGE_ME_redis_password}
+      # —— MinIO（RAGFlow 原始文档与 OSS 存储，复用平台 MinIO）
+      MINIO_HOST: minio
+      MINIO_PORT: "9000"
+      MINIO_USER: ${MINIO_ROOT_USER:-eapadmin}
+      MINIO_PASSWORD: ${MINIO_ROOT_PASSWORD:-CHANGE_ME_minio_password}
+      # —— 本地 Embedding（TEI）
+      TEI_HOST: tei
+      TEI_PORT: "80"
+      TEI_MODEL: ${TEI_MODEL:-BAAI/bge-m3}
+      # —— 服务端口
+      SVR_HTTP_PORT: "9380"
+      SVR_WEB_HTTP_PORT: "80"
+      SVR_WEB_HTTPS_PORT: "443"
+      ADMIN_SVR_HTTP_PORT: "9381"
+    volumes:
+      - ./ragflow/service_conf.yaml.template:/ragflow/conf/service_conf.yaml.template:ro
+      - ragflow-data:/ragflow/data
+      - ragflow-logs:/ragflow/logs
+    ports:
+      - "127.0.0.1:${RAGFLOW_HTTP_PORT:-9380}:9380"
+      - "127.0.0.1:${RAGFLOW_WEB_PORT:-80}:80"
+    networks:
+      - eap_data
+      - eap_ops
+    mem_limit: ${RAGFLOW_MEM_LIMIT:-8g}
+    cpus: ${RAGFLOW_CPUS:-4.0}
+
+  # ===========================================================================
+  # 五、ChatBI：DB-GPT（以 MCP Server 方式暴露，见 3.1「DB-GPT 以 MCP Server 暴露」）
+  # ===========================================================================
+
+  db-gpt:
+    <<: *common
+    # 固定版本标签，不用 :latest —— 避免上游漂移导致与文档声明的 0.8.3 不符。
+    # 镜像构建见 deploy/compose/dbgpt/Dockerfile（基础层 eosphorosai/dbgpt + psycopg2-binary）
+    image: ${DBGPT_IMAGE:-eapheavy/dbgpt:0.8.3-pg}
+    container_name: eap-db-gpt
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # DB-GPT 自身的元数据落到平台 PostgreSQL（避免再引入一套存储，3.1 存储组件）
+      DBGPT_DB_HOST: postgres
+      DBGPT_DB_PORT: "5432"
+      DBGPT_DB_USER: ${POSTGRES_USER:-eap}
+      DBGPT_DB_PASSWORD: ${POSTGRES_PASSWORD:-CHANGE_ME_postgres_password}
+      DBGPT_DB_NAME: ${DBGPT_DATABASE:-dbgpt}
+      TZ: ${TZ:-Asia/Shanghai}
+    # 不同 DB-GPT 版本的 MCP Server 入口命令不一致，通过 DBGPT_MCP_COMMAND 覆盖
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["${DBGPT_MCP_COMMAND:-dbgpt mcp server --host 0.0.0.0 --port 8092}"]
+    ports:
+      # 宿主端口用 8099，避开 mcp-hub 的 chatbi MCP（8092）与重型栈 db-gpt（8094/8096/8097）
+      - "127.0.0.1:${DBGPT_PORT:-8099}:8092"
+    networks:
+      - eap_data
+      - eap_ops
+    mem_limit: ${DBGPT_MEM_LIMIT:-4g}
+    cpus: ${DBGPT_CPUS:-2.0}
+
+  # ===========================================================================
+  # 六、出网代理：Envoy（唯一出口，SNI 白名单 + TLS 解密审计，见 8.3）
+  # ===========================================================================
+
+  envoy:
+    <<: *common
+    image: ${ENVOY_IMAGE:-envoyproxy/envoy:v1.31-latest}
+    container_name: eap-envoy
+    entrypoint: ["/bin/bash", "/etc/envoy/entrypoint.sh"]
+    environment:
+      # SNI 白名单，逗号分隔；非白名单域名一律 403
+      EGRESS_ALLOWED_HOSTS: ${EGRESS_ALLOWED_HOSTS:-api.openai.com,dashscope.aliyuncs.com,api.deepseek.com,open.bigmodel.cn,agent.minimaxi.com}
+      ENVOY_CONFIG: /etc/envoy/envoy.yaml
+    volumes:
+      - ./envoy/envoy.yaml:/etc/envoy/envoy.yaml:ro
+      - ./envoy/render-allowlist.awk:/etc/envoy/render-allowlist.awk:ro
+      - ./envoy/entrypoint.sh:/etc/envoy/entrypoint.sh:ro
+      - ./envoy/healthcheck.sh:/etc/envoy/healthcheck.sh:ro
+      - ./envoy/certs:/etc/envoy/certs:ro
+    ports:
+      - "127.0.0.1:${ENVOY_HTTP_PORT:-15000}:15000"
+      - "127.0.0.1:${ENVOY_HTTPS_PORT:-15001}:15001"
+      - "127.0.0.1:${ENVOY_ADMIN_PORT:-9901}:9901"
+    networks:
+      - eap_egress
+      - eap_ops
+    # 注：envoy 官方镜像不含 curl/wget，用独立脚本 + bash /dev/tcp 发原始 HTTP 请求探活
+    healthcheck:
+      test: ["CMD", "/etc/envoy/healthcheck.sh"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    mem_limit: ${ENVOY_MEM_LIMIT:-512m}
+    cpus: ${ENVOY_CPUS:-1.0}
+
+  # ===========================================================================
+  # 七、平台自研组件（TypeScript，Dockerfile 构建，build context = 仓库根）
+  # ===========================================================================
+
+  agentgateway:
+    <<: *common
+    build:
+      context: ../..
+      dockerfile: deploy/docker/gateway.Dockerfile
+      args:
+        NODE_VERSION: ${NODE_VERSION:-22}
+    image: ${GATEWAY_IMAGE:-eap/agentgateway:1.0.0}
+    container_name: eap-agentgateway
+    init: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      EAP_PLATFORM_ID: ${EAP_PLATFORM_ID:-eap-main}
+      # —— 网关自身
+      GATEWAY_PORT: "8080"
+      GATEWAY_HOST: "0.0.0.0"
+      GATEWAY_API_ROOT: http://agentgateway:8080
+      GATEWAY_OPENAI_BASE_URL: http://agentgateway:8080/v1
+      GATEWAY_REDACT_AUTHORIZATION: "true"
+      AGENT_DEFAULT_MODEL: ${AGENT_DEFAULT_MODEL:-smart-model}
+      # —— 出网代理（唯一出口，见 8.3 / 9.3）
+      EGRESS_PROXY_URL: ${EGRESS_PROXY_URL:-http://envoy:15000}
+      EGRESS_ALLOWED_HOSTS: ${EGRESS_ALLOWED_HOSTS:-api.openai.com,dashscope.aliyuncs.com,api.deepseek.com,open.bigmodel.cn,agent.minimaxi.com}
+      # —— 身份
+      KEYCLOAK_BASE_URL: http://keycloak:8080
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM:-enterprise}
+      KEYCLOAK_USER_ADMIN_CLIENT_ID: ${KEYCLOAK_USER_ADMIN_CLIENT_ID:-eap-gateway}
+      KEYCLOAK_USER_ADMIN_CLIENT_SECRET: ${KEYCLOAK_USER_ADMIN_CLIENT_SECRET:-CHANGE_ME_gateway_user_admin_secret}
+      KEYCLOAK_JWKS_URI: ${KEYCLOAK_JWKS_URI:-}
+      KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-http://localhost:8081/realms/enterprise}
+      KEYCLOAK_AUDIENCE: ${KEYCLOAK_AUDIENCE:-}
+      # 浏览器可达的 Keycloak 地址（控制台 OIDC 授权跳转用）——
+      # 容器内地址对浏览器不可达，必须单独给公网/宿主机地址
+      KEYCLOAK_PUBLIC_URL: ${KEYCLOAK_PUBLIC_URL:-http://localhost:8081}
+      KEYCLOAK_WEB_CLIENT_ID: ${KEYCLOAK_WEB_CLIENT_ID:-eap-webui}
+      KEYCLOAK_WEB_SCOPE: ${KEYCLOAK_WEB_SCOPE:-openid profile email}
+      AUTH_DEV_MODE: ${AUTH_DEV_MODE:-false}
+      AUTH_SINGLE_TENANT_MODE: ${AUTH_SINGLE_TENANT_MODE:-true}
+      AUTH_DEFAULT_TENANT_ID: ${AUTH_DEFAULT_TENANT_ID:-t-default}
+      # —— 存储
+      STORE_KIND: ${STORE_KIND:-sqlite}
+      STORE_SQLITE_PATH: /app/data/platform.db
+      POSTGRES_URL: postgres://${POSTGRES_USER:-eap}:${POSTGRES_PASSWORD:-CHANGE_ME_postgres_password}@postgres:5432/${POSTGRES_DB:-eap}
+      OBJECT_STORE_KIND: minio
+      OBJECT_STORE_VERSIONING: "true"
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: "9000"
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-eapadmin}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-CHANGE_ME_minio_password}
+      MINIO_BUCKET: ${MINIO_BUCKET:-eap-audit}
+      # —— MCP 注册表（全部经网关收口，见 2.1 单一网关原则）
+      MCP_SERVERS: ${MCP_SERVERS:-knowledge=http://mcp-hub:8091/mcp,chatbi=http://mcp-hub:8092/mcp,business=http://mcp-hub:8093/mcp}
+      MCP_TIMEOUT_MS: ${MCP_TIMEOUT_MS:-60000}
+      # —— 观测（Langfuse OTLP）
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://langfuse-web:3000/api/public/otel}
+      OTEL_SERVICE_NAME: agentgateway
+      LOCAL_TRACE_DIR: /app/data/traces
+      # —— 商业模型凭证（仅本网关进程可见，见 8.5 凭证安全）
+      MINIMAX_API_KEY: ${MINIMAX_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      QWEN_API_KEY: ${QWEN_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      ZHIPU_API_KEY: ${ZHIPU_API_KEY:-}
+      MINIMAX_BASE_URL: ${MINIMAX_BASE_URL:-https://agent.minimaxi.com/mavis/api/v1/llm/v1}
+      MINIMAX_PROTOCOL: ${MINIMAX_PROTOCOL:-anthropic}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      QWEN_BASE_URL: ${QWEN_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}
+      ZHIPU_BASE_URL: ${ZHIPU_BASE_URL:-https://open.bigmodel.cn/api/paas/v4}
+      LLM_CREDENTIAL_FILE: ${LLM_CREDENTIAL_FILE:-}
+      LLM_CREDENTIAL_PROVIDERS: ${LLM_CREDENTIAL_PROVIDERS:-minimax}
+      LLM_AUTH_MODE: ${LLM_AUTH_MODE:-auto}
+      LLM_TIMEOUT_MS: ${LLM_TIMEOUT_MS:-120000}
+      LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-1}
+      LLM_DEFAULT_QPS: ${LLM_DEFAULT_QPS:-20}
+      # —— 预算与护栏（见 4.3 / 8.2）
+      BUDGET_PLATFORM_MONTHLY_USD: ${BUDGET_PLATFORM_MONTHLY_USD:-500}
+      BUDGET_PLATFORM_MONTHLY_TOKENS: ${BUDGET_PLATFORM_MONTHLY_TOKENS:-100000000}
+      BUDGET_TENANT_OVERRUN_ACTION: ${BUDGET_TENANT_OVERRUN_ACTION:-circuit_break}
+      BUDGET_ALERT_RATIO: ${BUDGET_ALERT_RATIO:-0.8}
+      GUARDRAILS_PII_MASKING: "true"
+      GUARDRAILS_INJECTION_DETECTION: "true"
+      GUARDRAILS_BLOCK_CONFIDENTIAL_EGRESS: "true"
+      POLICY_DEFAULT_DECISION: enforce
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - platform-data:/app/data
+    ports:
+      - "127.0.0.1:${GATEWAY_PORT:-8080}:8080"
+    networks:
+      - eap_app
+      - eap_data
+      - eap_ops
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    mem_limit: ${GATEWAY_MEM_LIMIT:-1g}
+    cpus: ${GATEWAY_CPUS:-1.0}
+
+  agent-core:
+    <<: *common
+    build:
+      context: ../..
+      dockerfile: deploy/docker/agent-core.Dockerfile
+      args:
+        NODE_VERSION: ${NODE_VERSION:-22}
+    image: ${AGENT_IMAGE:-eap/agent-core:1.0.0}
+    container_name: eap-agent-core
+    init: true
+    depends_on:
+      agentgateway:
+        condition: service_healthy
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      AGENT_PORT: "8090"
+      AGENT_HOST: "0.0.0.0"
+      AGENT_MAX_ITERATIONS: ${AGENT_MAX_ITERATIONS:-8}
+      AGENT_DEFAULT_MODEL: ${AGENT_DEFAULT_MODEL:-smart-model}
+      AGENT_RAG_TOP_K: ${AGENT_RAG_TOP_K:-5}
+      AGENT_APPROVAL_TIMEOUT_MS: ${AGENT_APPROVAL_TIMEOUT_MS:-300000}
+      # —— ChatModel 全部指向 agentgateway 的 OpenAI 兼容端口（见 4.1 关键配置）
+      GATEWAY_API_ROOT: http://agentgateway:8080
+      GATEWAY_OPENAI_BASE_URL: http://agentgateway:8080/v1
+      MCP_SERVERS: ${MCP_SERVERS:-knowledge=http://mcp-hub:8091/mcp,chatbi=http://mcp-hub:8092/mcp,business=http://mcp-hub:8093/mcp}
+      KEYCLOAK_BASE_URL: http://keycloak:8080
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM:-enterprise}
+      KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-http://localhost:8081/realms/enterprise}
+      AUTH_DEV_MODE: ${AUTH_DEV_MODE:-false}
+      AUTH_SINGLE_TENANT_MODE: ${AUTH_SINGLE_TENANT_MODE:-true}
+      AUTH_DEFAULT_TENANT_ID: ${AUTH_DEFAULT_TENANT_ID:-t-default}
+      STORE_SQLITE_PATH: /app/data/platform.db
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://langfuse-web:3000/api/public/otel}
+      OTEL_SERVICE_NAME: agent-core
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - platform-data:/app/data
+    ports:
+      - "127.0.0.1:${AGENT_PORT:-8090}:8090"
+    networks:
+      - eap_app
+      - eap_ops
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8090/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    mem_limit: ${AGENT_MEM_LIMIT:-1g}
+    cpus: ${AGENT_CPUS:-1.0}
+
+  mcp-hub:
+    <<: *common
+    build:
+      context: ../..
+      dockerfile: deploy/docker/mcp-hub.Dockerfile
+      args:
+        NODE_VERSION: ${NODE_VERSION:-22}
+    image: ${MCP_HUB_IMAGE:-eap/mcp-hub:1.0.0}
+    container_name: eap-mcp-hub
+    init: true
+    depends_on:
+      agentgateway:
+        condition: service_healthy
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      EAP_DATA_DIR: /app/data
+      # 容器内必须绑 0.0.0.0，供同网络容器按服务名互访；
+      # 宿主进程模式请设 MCP_HUB_HOST=127.0.0.1 收口到回环
+      MCP_HUB_HOST: "0.0.0.0"
+      MCP_KNOWLEDGE_PORT: "8091"
+      MCP_CHATBI_PORT: "8092"
+      MCP_BUSINESS_PORT: "8093"
+      CHATBI_DB_PATH: /app/data/chatbi.db
+      STORE_SQLITE_PATH: /app/data/platform.db
+      GATEWAY_API_ROOT: http://agentgateway:8080
+      GATEWAY_OPENAI_BASE_URL: http://agentgateway:8080/v1
+      # —— 身份：MCP Hub 回调网关（Text2SQL）走服务账号 client_credentials
+      KEYCLOAK_BASE_URL: http://keycloak:8080
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM:-enterprise}
+      KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-http://localhost:8081/realms/enterprise}
+      AUTH_DEV_MODE: ${AUTH_DEV_MODE:-false}
+      KEYCLOAK_SERVICE_CLIENT_ID: ${KEYCLOAK_SERVICE_CLIENT_ID:-eap-agent}
+      KEYCLOAK_SERVICE_CLIENT_SECRET: ${KEYCLOAK_SERVICE_CLIENT_SECRET:-CHANGE_ME_service_client_secret}
+      # —— 检索引擎与本地嵌入（见 4.2；未配置则自动回退本地 BM25）
+      INFINITY_BASE_URL: ${INFINITY_BASE_URL:-}
+      INFINITY_TABLE: ${INFINITY_TABLE:-eap_knowledge_chunks}
+      INFINITY_TIMEOUT_MS: ${INFINITY_TIMEOUT_MS:-10000}
+      TEI_BASE_URL: ${TEI_BASE_URL:-}
+      TEI_EMBED_DIMENSIONS: ${TEI_EMBED_DIMENSIONS:-0}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - platform-data:/app/data
+    ports:
+      - "127.0.0.1:${MCP_KNOWLEDGE_PORT:-8091}:8091"
+      - "127.0.0.1:${MCP_CHATBI_PORT:-8092}:8092"
+      - "127.0.0.1:${MCP_BUSINESS_PORT:-8093}:8093"
+    networks:
+      - eap_app
+      - eap_ops
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8091/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    mem_limit: ${MCP_HUB_MEM_LIMIT:-512m}
+    cpus: ${MCP_HUB_CPUS:-0.5}
+
+  webui:
+    <<: *common
+    build:
+      context: ../..
+      dockerfile: deploy/docker/webui.Dockerfile
+      args:
+        NODE_VERSION: ${NODE_VERSION:-22}
+    image: ${WEBUI_IMAGE:-eap/webui:1.0.0}
+    container_name: eap-webui
+    depends_on:
+      agent-core:
+        condition: service_healthy
+    environment:
+      WEBUI_PORT: "5173"
+      WEBUI_API_BASE_URL: http://agent-core:8090
+    ports:
+      - "127.0.0.1:${WEBUI_PORT:-5173}:5173"
+    networks:
+      - eap_app
+      - eap_ops
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:5173/"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    mem_limit: ${WEBUI_MEM_LIMIT:-256m}
+    cpus: ${WEBUI_CPUS:-0.5}
+
+# =============================================================================
+# 网络（见 9.3 网络要求）：internal 网络内的容器无默认路由，无法直连外网
+# =============================================================================
+networks:
+  eap_support:
+    name: ${NETWORK_PREFIX:-eap}_support
+    driver: bridge
+    internal: true
+  eap_data:
+    name: ${NETWORK_PREFIX:-eap}_data
+    driver: bridge
+    internal: true
+  # 宿主访问网络：Docker 不会为「只挂 internal 网络」的容器发布端口，
+  # 因此所有需要暴露宿主端口的服务额外挂这一张可路由网。
+  # 分层隔离（internal 网络）仍然保留 —— 服务同时属于本层与 eap_ops。
+  eap_ops:
+    name: ${NETWORK_PREFIX:-eap}_ops
+    driver: bridge
+  eap_app:
+    name: ${NETWORK_PREFIX:-eap}_app
+    driver: bridge
+    internal: true
+  # 唯一拥有外网路由的网络，仅 envoy 接入 —— 出网必须经过出网代理（见 8.3）
+  eap_egress:
+    name: ${NETWORK_PREFIX:-eap}_egress
+    driver: bridge
+
+# =============================================================================
+# 持久卷（见 9.4 关键部署参数：Infinity 数据目录必须持久化）
+# =============================================================================
+volumes:
+  pg-data:
+    name: ${VOLUME_PREFIX:-eap}_pg-data
+  redis-data:
+    name: ${VOLUME_PREFIX:-eap}_redis-data
+  minio-data:
+    name: ${VOLUME_PREFIX:-eap}_minio-data
+  infinity-data:
+    name: ${VOLUME_PREFIX:-eap}_infinity-data
+  # RAGFlow 专用 Infinity 0.6.x 实例的数据卷（与平台侧检索库完全隔离）
+  infinity-ragflow-data:
+    name: ${VOLUME_PREFIX:-eap}_infinity-ragflow-data
+  clickhouse-data:
+    name: ${VOLUME_PREFIX:-eap}_clickhouse-data
+  ragflow-data:
+    name: ${VOLUME_PREFIX:-eap}_ragflow-data
+  ragflow-logs:
+    name: ${VOLUME_PREFIX:-eap}_ragflow-logs
+  tei-cache:
+    name: ${VOLUME_PREFIX:-eap}_tei-cache
+  mysql-data:
+    name: ${VOLUME_PREFIX:-eap}_mysql-data
+  # DB-GPT 元数据与向量存储
+  dbgpt-data:
+    name: ${VOLUME_PREFIX:-eap}_dbgpt-data
+  keycloak-data:
+    name: ${VOLUME_PREFIX:-eap}_keycloak-data
+  platform-data:
+    name: ${VOLUME_PREFIX:-eap}_platform-data

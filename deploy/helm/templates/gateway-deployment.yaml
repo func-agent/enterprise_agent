@@ -1,0 +1,257 @@
+{{/* ===================================================================
+  agentgateway —— 统一网关（见 3.1 网关组件 / 4.3 核心能力）
+  9.4 关键部署参数：agentgateway 2 副本 + PDB
+  =================================================================== */}}
+{{- if .Values.gatewayLayer.gateway.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "eap.fullname" . }}-agentgateway
+  namespace: {{ include "eap.ns.app" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  replicas: {{ .Values.gatewayLayer.gateway.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "eap.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: gateway
+  template:
+    metadata:
+      labels:
+        {{- include "eap.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: gateway
+    spec:
+      {{- include "eap.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      containers:
+        - name: agentgateway
+          image: {{ include "eap.image" (dict "root" . "repository" .Values.gatewayLayer.gateway.image.repository "tag" .Values.gatewayLayer.gateway.image.tag) }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: {{ .Values.gatewayLayer.gateway.service.port }}
+              protocol: TCP
+          env:
+            {{- include "eap.appEnv" . | nindent 12 }}
+            - name: LOG_LEVEL
+              value: "info"
+            - name: GATEWAY_PORT
+              value: {{ .Values.gatewayLayer.gateway.service.port | quote }}
+            - name: GATEWAY_HOST
+              value: "0.0.0.0"
+            - name: AGENT_DEFAULT_MODEL
+              value: {{ .Values.appLayer.agentCore.defaultModel | quote }}
+            - name: GATEWAY_API_ROOT
+              value: {{ printf "http://%s-agentgateway.%s.svc:%v" (include "eap.fullname" .) (include "eap.ns.app" .) .Values.gatewayLayer.gateway.service.port | quote }}
+            - name: GATEWAY_OPENAI_BASE_URL
+              value: {{ printf "http://%s-agentgateway.%s.svc:%v/v1" (include "eap.fullname" .) (include "eap.ns.app" .) .Values.gatewayLayer.gateway.service.port | quote }}
+            # —— 出网代理：唯一出口（见 8.3 / 9.3）
+            - name: EGRESS_PROXY_URL
+              value: {{ printf "http://%s-envoy.%s.svc:%v" (include "eap.fullname" .) (include "eap.ns.app" .) .Values.securityLayer.envoy.service.httpPort | quote }}
+            - name: EGRESS_ALLOWED_HOSTS
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "eap.fullname" . }}-platform-config
+                  key: EGRESS_ALLOWED_HOSTS
+            # —— 身份
+            - name: KEYCLOAK_BASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "eap.fullname" . }}-platform-config
+                  key: KEYCLOAK_BASE_URL
+            - name: KEYCLOAK_REALM
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "eap.fullname" . }}-platform-config
+                  key: KEYCLOAK_REALM
+            - name: KEYCLOAK_USER_ADMIN_CLIENT_ID
+              value: {{ .Values.identityLayer.keycloak.auth.userAdminClientId | quote }}
+            - name: KEYCLOAK_USER_ADMIN_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: keycloak-user-admin-client-secret
+            # —— 控制台 OIDC 登录（授权码 + PKCE）——
+            - name: KEYCLOAK_PUBLIC_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "eap.fullname" . }}-platform-config
+                  key: KEYCLOAK_PUBLIC_URL
+            - name: KEYCLOAK_WEB_CLIENT_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "eap.fullname" . }}-platform-config
+                  key: KEYCLOAK_WEB_CLIENT_ID
+            - name: KEYCLOAK_WEB_SCOPE
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "eap.fullname" . }}-platform-config
+                  key: KEYCLOAK_WEB_SCOPE
+            - name: AUTH_DEV_MODE
+              value: "false"
+            - name: AUTH_SINGLE_TENANT_MODE
+              value: "true"
+            - name: AUTH_DEFAULT_TENANT_ID
+              value: "t-default"
+            # —— 存储
+            - name: OBJECT_STORE_KIND
+              value: "minio"
+            - name: OBJECT_STORE_VERSIONING
+              value: "true"
+            - name: MINIO_ENDPOINT
+              value: {{ printf "%s-minio.%s.svc" (include "eap.fullname" .) (include "eap.ns.support" .) | quote }}
+            - name: MINIO_PORT
+              value: {{ .Values.supportLayer.minio.service.apiPort | quote }}
+            - name: MINIO_BUCKET
+              value: {{ .Values.supportLayer.minio.buckets | first | dig "name" "eap-audit" | quote }}
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: minio-root-user
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: minio-root-password
+            # —— MCP 注册表（全部经网关收口，见 2.1 单一网关）
+            - name: MCP_SERVERS
+              value: {{ printf "knowledge=http://%s-mcp-hub.%s.svc:%v/mcp,chatbi=http://%s-mcp-hub.%s.svc:%v/mcp,business=http://%s-mcp-hub.%s.svc:%v/mcp" (include "eap.fullname" .) (include "eap.ns.app" .) .Values.gatewayLayer.mcpHub.service.knowledgePort (include "eap.fullname" .) (include "eap.ns.app" .) .Values.gatewayLayer.mcpHub.service.chatbiPort (include "eap.fullname" .) (include "eap.ns.app" .) .Values.gatewayLayer.mcpHub.service.businessPort | quote }}
+            # —— 预算（见 4.3）
+            - name: BUDGET_PLATFORM_MONTHLY_USD
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "eap.fullname" . }}-platform-config
+                  key: BUDGET_PLATFORM_MONTHLY_USD
+            - name: BUDGET_PLATFORM_MONTHLY_TOKENS
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "eap.fullname" . }}-platform-config
+                  key: BUDGET_PLATFORM_MONTHLY_TOKENS
+            # —— 观测（见 3.1 唯一观测组件）
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "eap.fullname" . }}-platform-config
+                  key: OTEL_EXPORTER_OTLP_ENDPOINT
+            - name: LANGFUSE_PUBLIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: langfuse-public-key
+            - name: LANGFUSE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: langfuse-secret-key
+            # —— 商业模型 API Key（仅网关可见，见 8.5 凭证安全）
+            - name: QWEN_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-llm-keys" (include "eap.fullname" .)) }}
+                  key: QWEN_API_KEY
+            - name: DEEPSEEK_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-llm-keys" (include "eap.fullname" .)) }}
+                  key: DEEPSEEK_API_KEY
+            - name: ZHIPU_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-llm-keys" (include "eap.fullname" .)) }}
+                  key: ZHIPU_API_KEY
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-llm-keys" (include "eap.fullname" .)) }}
+                  key: OPENAI_API_KEY
+            - name: MINIMAX_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-llm-keys" (include "eap.fullname" .)) }}
+                  key: MINIMAX_API_KEY
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.gatewayLayer.gateway.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "eap.fullname" . }}-agentgateway
+  namespace: {{ include "eap.ns.app" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "eap.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+  ports:
+    - name: http
+      port: {{ .Values.gatewayLayer.gateway.service.port }}
+      targetPort: http
+      protocol: TCP
+{{- if .Values.gatewayLayer.gateway.pdb.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "eap.fullname" . }}-agentgateway
+  namespace: {{ include "eap.ns.app" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  minAvailable: {{ .Values.gatewayLayer.gateway.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "eap.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: gateway
+{{- end }}
+{{- end }}

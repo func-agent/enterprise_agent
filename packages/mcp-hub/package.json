@@ -1,0 +1,19 @@
+{
+  "name": "@eap/mcp-hub",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@eap/platform-core": "1.0.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "express": "^4.21.2",
+    "pg": "^8.23.1",
+    "zod": "^4.6.7"
+  }
+}

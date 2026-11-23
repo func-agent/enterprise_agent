@@ -1,0 +1,208 @@
+{{/* ===================================================================
+  离线镜像仓：Harbor 2.x（见 3.1「Harbor 2.x：离线镜像仓（内网环境必需）」、9.2）
+  —— 默认关闭；内网交付时打开 harbor.enabled，并把 imageRegistry 指向 Harbor 地址
+  =================================================================== */}}
+{{- if .Values.harbor.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "eap.fullname" . }}-harbor-registry
+  namespace: {{ include "eap.ns.support" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: harbor-registry
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "eap.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: harbor-registry
+  ports:
+    - name: registry
+      port: 5000
+      targetPort: registry
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "eap.fullname" . }}-harbor-registry
+  namespace: {{ include "eap.ns.support" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: harbor-registry
+spec:
+  serviceName: {{ include "eap.fullname" . }}-harbor-registry
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "eap.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: harbor-registry
+  template:
+    metadata:
+      labels:
+        {{- include "eap.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: harbor-registry
+    spec:
+      {{- include "eap.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: registry
+          image: {{ include "eap.image" (dict "root" . "repository" .Values.harbor.registryImage.repository "tag" .Values.harbor.registryImage.tag) }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: registry
+              containerPort: 5000
+          env:
+            - name: REGISTRY_STORAGE_DELETE_ENABLED
+              value: "true"
+            - name: REGISTRY_HTTP_ADDR
+              value: ":5000"
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: registry-data
+              mountPath: /var/lib/registry
+      {{- if not .Values.harbor.storage }}
+      volumes:
+        - name: registry-data
+          emptyDir: {}
+      {{- end }}
+  {{- if .Values.harbor.storage }}
+  volumeClaimTemplates:
+    - metadata:
+        name: registry-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- include "eap.storageClass" (dict "root" $ "storageClass" .Values.harbor.storage.storageClass) | nindent 8 }}
+        resources:
+          requests:
+            storage: {{ .Values.harbor.storage.size }}
+  {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "eap.fullname" . }}-harbor
+  namespace: {{ include "eap.ns.support" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: harbor
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "eap.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: harbor-core
+  ports:
+    - name: http
+      port: {{ .Values.harbor.service.port }}
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "eap.fullname" . }}-harbor-core
+  namespace: {{ include "eap.ns.support" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: harbor-core
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "eap.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: harbor-core
+  template:
+    metadata:
+      labels:
+        {{- include "eap.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: harbor-core
+    spec:
+      {{- include "eap.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: core
+          image: {{ include "eap.image" (dict "root" . "repository" .Values.harbor.image.repository "tag" .Values.harbor.image.tag) }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: CORE_URL
+              value: {{ printf "http://%s-harbor.%s.svc:%v" (include "eap.fullname" .) (include "eap.ns.support" .) .Values.harbor.service.port | quote }}
+            - name: REGISTRY_URL
+              value: {{ printf "http://%s-harbor-registry.%s.svc:5000" (include "eap.fullname" .) (include "eap.ns.support" .) | quote }}
+            - name: POSTGRESQL_HOST
+              value: {{ printf "%s-postgres" (include "eap.fullname" .) | quote }}
+            - name: POSTGRESQL_PORT
+              value: {{ .Values.supportLayer.postgres.service.port | quote }}
+            - name: POSTGRESQL_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: postgres-username
+            - name: POSTGRESQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: postgres-password
+            - name: POSTGRESQL_DATABASE
+              value: "harbor"
+            - name: REDIS_HOST
+              value: {{ printf "%s-redis" (include "eap.fullname" .) | quote }}
+            - name: REDIS_PORT
+              value: {{ .Values.supportLayer.redis.service.port | quote }}
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: redis-password
+            - name: HARBOR_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: harbor-admin-password
+            - name: CORE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: harbor-admin-password
+          livenessProbe:
+            httpGet:
+              path: /api/v2.0/health
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 10
+          readinessProbe:
+            httpGet:
+              path: /api/v2.0/health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 10
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: core
+              mountPath: /etc/core
+      volumes:
+        - name: core
+          emptyDir: {}
+{{- end }}

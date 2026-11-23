@@ -1,0 +1,22 @@
+apiVersion: v2
+name: enterprise-ai-agent-platform
+description: 企业级 AI Agent 平台 —— 依据《企业级 AI Agent 平台建设方案》第 3.1 节「组件总览」与第 9 章「部署方案与硬件配置」
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - ai-agent
+  - agentscope
+  - agentgateway
+  - ragflow
+  - infinity
+  - keycloak
+  - langfuse
+annotations:
+  # —— 方案依据（评审时可回溯）
+  plan.source: "《企业级 AI Agent 平台建设方案》"
+  plan.component-list: "3.1 组件总览"
+  plan.deployment: "第 9 章 部署方案与硬件配置（9.1 硬件配置 / 9.2 部署形态 / 9.3 网络要求 / 9.4 关键部署参数）"
+  plan.network-isolation: "9.3 网络要求：组件按层分 namespace，出网只允许经过 agentgateway + 出网代理"
+  plan.gateway-replicas: "9.4 关键部署参数：agentgateway 2 副本 + PDB"
+  plan.notes: "见 3.2 明确排除的组件及理由：不引入 Vault / ES / Prometheus 栈 / 第二网关"

@@ -1,0 +1,570 @@
+{{/* ===================================================================
+  知识层：RAGFlow + Infinity + TEI
+  见 4.2（RAGFlow + Infinity 混合检索）与 9.4（DOC_ENGINE=infinity，数据目录持久卷）
+  =================================================================== */}}
+{{- if .Values.knowledgeLayer.infinity.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "eap.fullname" . }}-infinity
+  namespace: {{ include "eap.ns.data" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: infinity
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "eap.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: infinity
+  ports:
+    - name: client
+      port: {{ .Values.knowledgeLayer.infinity.service.clientPort }}
+      targetPort: client
+    - name: http
+      port: {{ .Values.knowledgeLayer.infinity.service.httpPort }}
+      targetPort: http
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "eap.fullname" . }}-infinity-config
+  namespace: {{ include "eap.ns.data" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: infinity
+data:
+  infinity_conf.toml: |
+    [general]
+    version                  = "0.6.5"
+    time_zone                = "utc-8"
+
+    [network]
+    server_address           = "0.0.0.0"
+    postgres_port            = 5432
+    http_port                = {{ .Values.knowledgeLayer.infinity.service.httpPort }}
+    client_port              = {{ .Values.knowledgeLayer.infinity.service.clientPort }}
+    connection_pool_size     = 128
+
+    [log]
+    log_filename             = "infinity.log"
+    log_dir                  = "/var/infinity/log"
+    log_to_stdout            = true
+    log_file_max_size        = "100MB"
+    log_file_rotate_count    = 10
+    log_level                = "info"
+
+    [storage]
+    persistence_dir          = "/var/infinity/persistence"
+    data_dir                 = "/var/infinity/data"
+    optimize_interval        = "10s"
+    cleanup_interval         = "60s"
+    compact_interval         = "120s"
+    storage_type             = "local"
+    mem_index_capacity       = 65536
+
+    [buffer]
+    buffer_manager_size      = "4GB"
+    lru_num                  = 7
+    temp_dir                 = "/var/infinity/tmp"
+    result_cache             = "off"
+    memindex_memory_quota    = "1GB"
+
+    [wal]
+    wal_dir                  = "/var/infinity/wal"
+
+    [resource]
+    resource_dir             = "/var/infinity/resource"
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "eap.fullname" . }}-infinity
+  namespace: {{ include "eap.ns.data" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: infinity
+spec:
+  serviceName: {{ include "eap.fullname" . }}-infinity
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "eap.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: infinity
+  template:
+    metadata:
+      labels:
+        {{- include "eap.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: infinity
+    spec:
+      {{- include "eap.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: infinity
+          image: {{ include "eap.image" (dict "root" . "repository" .Values.knowledgeLayer.infinity.image.repository "tag" .Values.knowledgeLayer.infinity.image.tag) }}
+          imagePullPolicy: IfNotPresent
+          args: ["-f", "/infinity_conf.toml"]
+          ports:
+            - name: client
+              containerPort: {{ .Values.knowledgeLayer.infinity.service.clientPort }}
+            - name: http
+              containerPort: {{ .Values.knowledgeLayer.infinity.service.httpPort }}
+          livenessProbe:
+            httpGet:
+              path: /admin/node/current
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 10
+          readinessProbe:
+            httpGet:
+              path: /admin/node/current
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 10
+          resources:
+            {{- toYaml .Values.knowledgeLayer.infinity.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /infinity_conf.toml
+              subPath: infinity_conf.toml
+              readOnly: true
+            - name: data
+              mountPath: /var/infinity
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "eap.fullname" . }}-infinity-config
+        {{- if not .Values.knowledgeLayer.infinity.persistence }}
+        - name: data
+          emptyDir: {}
+        {{- end }}
+  {{- if .Values.knowledgeLayer.infinity.persistence }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- include "eap.storageClass" (dict "root" $ "storageClass" .Values.knowledgeLayer.infinity.storage.storageClass) | nindent 8 }}
+        resources:
+          requests:
+            storage: {{ .Values.knowledgeLayer.infinity.storage.size }}
+  {{- end }}
+{{- end }}
+
+{{- if .Values.knowledgeLayer.tei.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "eap.fullname" . }}-tei
+  namespace: {{ include "eap.ns.data" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tei
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "eap.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: tei
+  ports:
+    - name: http
+      port: {{ .Values.knowledgeLayer.tei.service.port }}
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "eap.fullname" . }}-tei
+  namespace: {{ include "eap.ns.data" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tei
+spec:
+  serviceName: {{ include "eap.fullname" . }}-tei
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "eap.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: tei
+  template:
+    metadata:
+      labels:
+        {{- include "eap.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: tei
+    spec:
+      {{- include "eap.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      initContainers:
+        # —— 模型缓存目录（离线环境挂载内网模型仓，见 9.2）
+        - name: model-cache
+          image: {{ include "eap.image" (dict "root" . "repository" .Values.knowledgeLayer.tei.image.repository "tag" .Values.knowledgeLayer.tei.image.tag) }}
+          command: ["sh", "-c", "mkdir -p /data && echo 模型缓存目录就绪"]
+          volumeMounts:
+            - name: model-cache
+              mountPath: /data
+      containers:
+        - name: tei
+          image: {{ include "eap.image" (dict "root" . "repository" .Values.knowledgeLayer.tei.image.repository "tag" .Values.knowledgeLayer.tei.image.tag) }}
+          imagePullPolicy: IfNotPresent
+          args: ["--model-id", "{{ .Values.knowledgeLayer.tei.model.id }}", "--auto-truncate", "--port", "{{ .Values.knowledgeLayer.tei.service.port }}"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.knowledgeLayer.tei.service.port }}
+          env:
+            - name: HF_HOME
+              value: "/data"
+            - name: HUGGINGFACE_HUB_CACHE
+              value: "/data/hub"
+            {{- if .Values.knowledgeLayer.tei.model.endpoint }}
+            - name: HF_ENDPOINT
+              value: {{ .Values.knowledgeLayer.tei.model.endpoint | quote }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.knowledgeLayer.tei.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: model-cache
+              mountPath: /data
+      volumes:
+        - name: model-cache
+        {{- if .Values.knowledgeLayer.tei.persistence }}
+          persistentVolumeClaim:
+            claimName: model-{{ include "eap.fullname" . }}-tei
+        {{- else }}
+          emptyDir: {}
+        {{- end }}
+  {{- if .Values.knowledgeLayer.tei.persistence }}
+  volumeClaimTemplates:
+    - metadata:
+        name: model
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- include "eap.storageClass" (dict "root" $ "storageClass" .Values.knowledgeLayer.tei.storage.storageClass) | nindent 8 }}
+        resources:
+          requests:
+            storage: {{ .Values.knowledgeLayer.tei.storage.size }}
+  {{- end }}
+{{- end }}
+
+{{- if .Values.knowledgeLayer.ragflow.enabled }}
+---
+# —— RAGFlow v0.22 自身的元数据库（平台元数据仍在 PostgreSQL 16，见 3.1 存储组件）
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "eap.fullname" . }}-ragflow-mysql
+  namespace: {{ include "eap.ns.data" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ragflow-mysql
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "eap.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: ragflow-mysql
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: mysql
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "eap.fullname" . }}-ragflow-mysql
+  namespace: {{ include "eap.ns.data" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ragflow-mysql
+spec:
+  serviceName: {{ include "eap.fullname" . }}-ragflow-mysql
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "eap.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: ragflow-mysql
+  template:
+    metadata:
+      labels:
+        {{- include "eap.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: ragflow-mysql
+    spec:
+      {{- include "eap.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: mysql
+          image: {{ include "eap.image" (dict "root" . "repository" "mysql" "tag" "8.0.39") }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - --max_connections=1000
+            - --character-set-server=utf8mb4
+            - --collation-server=utf8mb4_unicode_ci
+          ports:
+            - name: mysql
+              containerPort: 3306
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: ragflow-mysql-password
+            - name: MYSQL_DATABASE
+              value: {{ .Values.knowledgeLayer.ragflow.mysql.dbName | quote }}
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "mysqladmin ping -uroot -p\"$MYSQL_ROOT_PASSWORD\""]
+            initialDelaySeconds: 40
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 8
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "mysqladmin ping -uroot -p\"$MYSQL_ROOT_PASSWORD\""]
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 8
+          resources:
+            requests:
+              cpu: 500m
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+      {{- if not .Values.knowledgeLayer.ragflow.persistence }}
+      volumes:
+        - name: data
+          emptyDir: {}
+      {{- end }}
+  {{- if .Values.knowledgeLayer.ragflow.persistence }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- include "eap.storageClass" (dict "root" $ "storageClass" .Values.knowledgeLayer.ragflow.storage.storageClass) | nindent 8 }}
+        resources:
+          requests:
+            storage: {{ .Values.knowledgeLayer.ragflow.storage.size }}
+  {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "eap.fullname" . }}-ragflow
+  namespace: {{ include "eap.ns.data" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ragflow
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "eap.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: ragflow
+  ports:
+    - name: http
+      port: {{ .Values.knowledgeLayer.ragflow.service.httpPort }}
+      targetPort: http
+    - name: web
+      port: {{ .Values.knowledgeLayer.ragflow.service.webPort }}
+      targetPort: web
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "eap.fullname" . }}-ragflow-config
+  namespace: {{ include "eap.ns.data" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ragflow
+data:
+  service_conf.yaml.template: |
+    ragflow:
+      host: 0.0.0.0
+      http_port: {{ .Values.knowledgeLayer.ragflow.service.httpPort }}
+    admin:
+      host: 0.0.0.0
+      http_port: 9381
+    mysql:
+      name: '${MYSQL_DBNAME:-{{ .Values.knowledgeLayer.ragflow.mysql.dbName }}}'
+      user: '${MYSQL_USER:-{{ .Values.knowledgeLayer.ragflow.mysql.user }}}'
+      password: '${MYSQL_PASSWORD}'
+      host: '${MYSQL_HOST:-{{ include "eap.fullname" . }}-ragflow-mysql}'
+      port: 3306
+      max_connections: 900
+      stale_timeout: 300
+      max_allowed_packet: 1073741824
+    minio:
+      user: '${MINIO_USER}'
+      password: '${MINIO_PASSWORD}'
+      host: '${MINIO_HOST:-{{ include "eap.fullname" . }}-minio.{{ include "eap.ns.support" . }}.svc}:{{ .Values.supportLayer.minio.service.apiPort }}'
+    # —— 检索引擎：Infinity（DOC_ENGINE=infinity，不部署 ES，见 9.4）
+    infinity:
+      uri: '${INFINITY_HOST:-{{ include "eap.fullname" . }}-infinity.{{ include "eap.ns.data" . }}.svc}:{{ .Values.knowledgeLayer.infinity.service.clientPort }}'
+      db_name: 'default_db'
+    redis:
+      db: 1
+      password: '${REDIS_PASSWORD}'
+      host: '${REDIS_HOST:-{{ include "eap.fullname" . }}-redis.{{ include "eap.ns.support" . }}.svc}:{{ .Values.supportLayer.redis.service.port }}'
+    user_default_llm:
+      default_models:
+        embedding_model:
+          api_key: 'xxx'
+          base_url: 'http://${TEI_HOST:-{{ include "eap.fullname" . }}-tei.{{ include "eap.ns.data" . }}.svc}:{{ .Values.knowledgeLayer.tei.service.port }}'
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "eap.fullname" . }}-ragflow
+  namespace: {{ include "eap.ns.data" . }}
+  labels:
+    {{- include "eap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ragflow
+spec:
+  serviceName: {{ include "eap.fullname" . }}-ragflow
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "eap.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: ragflow
+  template:
+    metadata:
+      labels:
+        {{- include "eap.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: ragflow
+    spec:
+      {{- include "eap.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: ragflow
+          image: {{ include "eap.image" (dict "root" . "repository" .Values.knowledgeLayer.ragflow.image.repository "tag" .Values.knowledgeLayer.ragflow.image.tag) }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: {{ .Values.knowledgeLayer.ragflow.service.httpPort }}
+            - name: web
+              containerPort: {{ .Values.knowledgeLayer.ragflow.service.webPort }}
+          env:
+            # —— 9.4 关键部署参数：文档引擎固定 infinity
+            - name: DOC_ENGINE
+              value: {{ .Values.knowledgeLayer.ragflow.docEngine | quote }}
+            - name: COMPOSE_PROFILES
+              value: {{ .Values.knowledgeLayer.ragflow.docEngine | quote }}
+            - name: TZ
+              value: {{ .Values.global.tz | quote }}
+            - name: MYSQL_HOST
+              value: {{ printf "%s-ragflow-mysql" (include "eap.fullname" .) | quote }}
+            - name: MYSQL_PORT
+              value: "3306"
+            - name: MYSQL_DBNAME
+              value: {{ .Values.knowledgeLayer.ragflow.mysql.dbName | quote }}
+            - name: MYSQL_USER
+              value: {{ .Values.knowledgeLayer.ragflow.mysql.user | quote }}
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: ragflow-mysql-password
+            - name: REDIS_HOST
+              value: {{ printf "%s-redis" (include "eap.fullname" .) | quote }}
+            - name: REDIS_PORT
+              value: {{ .Values.supportLayer.redis.service.port | quote }}
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: redis-password
+            - name: MINIO_HOST
+              value: {{ printf "%s-minio" (include "eap.fullname" .) | quote }}
+            - name: MINIO_PORT
+              value: {{ .Values.supportLayer.minio.service.apiPort | quote }}
+            - name: MINIO_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: minio-root-user
+            - name: MINIO_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (printf "%s-secret" (include "eap.fullname" .)) }}
+                  key: minio-root-password
+            - name: INFINITY_HOST
+              value: {{ printf "%s-infinity" (include "eap.fullname" .) | quote }}
+            - name: INFINITY_THRIFT_PORT
+              value: {{ .Values.knowledgeLayer.infinity.service.clientPort | quote }}
+            - name: INFINITY_HTTP_PORT
+              value: {{ .Values.knowledgeLayer.infinity.service.httpPort | quote }}
+            - name: TEI_HOST
+              value: {{ printf "%s-tei" (include "eap.fullname" .) | quote }}
+            - name: TEI_PORT
+              value: {{ .Values.knowledgeLayer.tei.service.port | quote }}
+            - name: TEI_MODEL
+              value: {{ .Values.knowledgeLayer.tei.model.id | quote }}
+            - name: SVR_HTTP_PORT
+              value: {{ .Values.knowledgeLayer.ragflow.service.httpPort | quote }}
+            - name: SVR_WEB_HTTP_PORT
+              value: {{ .Values.knowledgeLayer.ragflow.service.webPort | quote }}
+          livenessProbe:
+            httpGet:
+              path: /v1/system/healthz
+              port: http
+            initialDelaySeconds: 90
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 10
+          readinessProbe:
+            httpGet:
+              path: /v1/system/healthz
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 10
+          resources:
+            {{- toYaml .Values.knowledgeLayer.ragflow.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /ragflow/conf/service_conf.yaml.template
+              subPath: service_conf.yaml.template
+              readOnly: true
+            - name: data
+              mountPath: /ragflow/data
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "eap.fullname" . }}-ragflow-config
+        - name: data
+        {{- if .Values.knowledgeLayer.ragflow.persistence }}
+          persistentVolumeClaim:
+            claimName: data-{{ include "eap.fullname" . }}-ragflow
+        {{- else }}
+          emptyDir: {}
+        {{- end }}
+  {{- if .Values.knowledgeLayer.ragflow.persistence }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- include "eap.storageClass" (dict "root" $ "storageClass" .Values.knowledgeLayer.ragflow.storage.storageClass) | nindent 8 }}
+        resources:
+          requests:
+            storage: {{ .Values.knowledgeLayer.ragflow.storage.size }}
+  {{- end }}
+{{- end }}

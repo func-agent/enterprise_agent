@@ -1,0 +1,61 @@
+{
+  "name": "enterprise-ai-agent-platform",
+  "version": "1.0.0",
+  "private": true,
+  "description": "企业级 AI Agent 平台 — 依据《企业级 AI Agent 平台建设方案》3.1 组件总览实现",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "npm run build:backend && npm run build:web",
+    "build:backend": "tsc -b packages/platform-core packages/gateway packages/auth-middleware packages/agent-core packages/mcp-hub",
+    "clean": "tsc -b --clean packages/platform-core packages/gateway packages/auth-middleware packages/agent-core packages/mcp-hub",
+    "typecheck": "tsc -b --pretty packages/platform-core packages/gateway packages/auth-middleware packages/agent-core packages/mcp-hub",
+    "start": "./scripts/start-all.sh start",
+    "stop": "./scripts/start-all.sh stop",
+    "infra:start": "./scripts/start-infra.sh start",
+    "infra:stop": "./scripts/start-infra.sh stop",
+    "dev:gateway": "tsx watch packages/gateway/src/main.ts",
+    "dev:agent": "tsx watch packages/agent-core/src/main.ts",
+    "start:gateway": "node packages/gateway/dist/main.js",
+    "start:agent": "node packages/agent-core/dist/main.js",
+    "build:web": "npm --workspace apps/webui run build",
+    "dev:web": "npm --workspace apps/webui run dev",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "e2e": "./scripts/e2e-check.sh",
+    "token": "tsx scripts/issue-token.ts"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.23.1",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "playwright": "^1.65.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  },
+  "allowScripts": {
+    "better-sqlite3@12.11.1": true,
+    "esbuild@0.25.12": true,
+    "esbuild@0.28.2": true,
+    "esbuild@0.21.5": true
+  },
+  "overrides": {
+    "@assistant-ui/core": "0.2.9",
+    "@assistant-ui/store": "0.2.13",
+    "@assistant-ui/tap": "0.5.14",
+    "assistant-stream": "0.3.19",
+    "assistant-cloud": "0.1.30",
+    "decode-uri-component": "0.5.1",
+    "fast-xml-parser": "5.12.1",
+    "zod": "4.6.7"
+  }
+}
