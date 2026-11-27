@@ -12,9 +12,9 @@
   },
   "scripts": {
     "build": "npm run build:backend && npm run build:web",
-    "build:backend": "tsc -b packages/platform-core packages/gateway packages/auth-middleware packages/agent-core packages/mcp-hub",
-    "clean": "tsc -b --clean packages/platform-core packages/gateway packages/auth-middleware packages/agent-core packages/mcp-hub",
-    "typecheck": "tsc -b --pretty packages/platform-core packages/gateway packages/auth-middleware packages/agent-core packages/mcp-hub",
+    "build:backend": "tsc -b packages/platform-core packages/gateway packages/auth-middleware packages/agent-core packages/mcp-hub packages/workflow-core",
+    "clean": "tsc -b --clean packages/platform-core packages/gateway packages/auth-middleware packages/agent-core packages/mcp-hub packages/workflow-core",
+    "typecheck": "tsc -b --pretty packages/platform-core packages/gateway packages/auth-middleware packages/agent-core packages/mcp-hub packages/workflow-core",
     "start": "./scripts/start-all.sh start",
     "stop": "./scripts/start-all.sh stop",
     "infra:start": "./scripts/start-infra.sh start",
