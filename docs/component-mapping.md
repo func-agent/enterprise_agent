@@ -553,6 +553,30 @@ realm 导入是**严格反序列化**，任何未知字段（如 `description`�
    manifest digest 必然变化，但镜像内容（层）一模一样。所以要比 **RootFS 层指纹**。
 
 
+## 十一、AI 工作流编排（V1，规划中）
+
+> **方案书没有这个组件。** 方案 3.1 的 17 个组件里没有工作流编排引擎，
+> 3.2 明确排除 **Dify**（原话：「首期用 AgentScope ReAct，确有需求再外挂」）。
+> 本仓库选择**自研等价实现**接管 Dify 的位置，理由与 AgentScope Core/Service 的处理一致
+> （见第一节「与官方 AgentScope 的关系」）：自研可保证**所有 LLM 与 MCP 调用都经 agentgateway**，
+> 而外挂 Dify 会引入它自己的模型调用通道与数据库，成为治理旁路。
+> 详细设计与契约见 [AI 工作流 V1 分析与设计](workflow-v1-design.md)。
+
+| 组件 | 优先级 | 方案要求 | 本项目实现 | 状态 |
+|---|---|---|---|---|
+| 工作流编排（自研，对应方案书 Dify 的位置） | V1 规划 | 方案 3.1/3.2 未列该组件 | `packages/workflow-core/`（领域逻辑：类型 / DAG 校验 / 条件求值 / Schema 子集 / 引用解析，**A1 已实现**）+ `packages/agent-core/src/workflow/`（路由与端口适配，A2 起）+ `apps/webui/`（React Flow 编辑器，阶段 C） | 🟡 阶段 A1 已实现（37 例单测），A2 起未开始 |
+
+**与被排除的 Dify 的差异**：
+
+- Dify 自带 DB、自带模型调用路径；自研实现**不引入第二个执行底座**，工作流节点只经
+  `agentgateway` 的 `/v1/chat/completions` 与 `/v1/mcp/call`，
+  因此预算、策略、Guardrails、HITL 审批闸门、审计**一步都不旁路**。
+- 审批链不另造：工作流复用平台既有的 `approvals` 表与网关侧的原子消费校验，
+  **不接受工作流级长期审批背书**。
+- 身份不借用：工作流以**实际运行者**身份调用模型、知识和工具，创建者与审批者身份只进审计。
+- V1 不承诺多副本、跨天无人值守与定时调度；这些需求出现时再评估 Temporal 作为持久化执行底座，
+  React Flow 画布与 DAG 契约可保留。
+
 ---
 
 ## 汇总
@@ -562,7 +586,7 @@ realm 导入是**严格反序列化**，任何未知字段（如 `description`�
 | ✅ 真实组件实测 | 9 | Infinity（0.7.5 平台侧 + 0.6.5 RAGFlow 专用）、Keycloak、Langfuse、ClickHouse、TEI、**RAGFlow v0.22.1**、**DB-GPT 0.8.3**、**Envoy 1.31（出网代理）**、**Harbor 2.15.5（离线镜像仓）**（+ 重型栈自带的 PostgreSQL / Redis / MinIO / MySQL） |
 | ✅ 自研实现并有测试 | 7 | AgentScope Core/Service、Web UI、agentgateway、鉴权中间件、商业模型接入、存储抽象层、**DB-GPT 的 MCP Server 适配器**（平台侧集成） |
 | 🟡 接口等价的本地实现 | 1 | 平台侧 RAGFlow 工具层（平台侧 DB-GPT ChatBI 工具层已下沉到 DB-GPT 本体，仅保留为 fallback） |
-| 📦 仅编排交付 | 0 | ——（Harbor 已从 📦 转为 ✅ 真实实测） |
+| 📦 仅编排交付 | 1 | AI 工作流编排（自研 `packages/workflow-core`，对应方案书被排除的 Dify 位置；**阶段 A1 已实现**，A2 起未开始） |
 
 > 🟡 指的是**平台 MCP Hub 侧的等价工具层**（`knowledge.search` 等），并非组件本身是模拟的 ——
 > RAGFlow 与 DB-GPT 组件本体均已用**真实容器**拉起并跑通端到端功能。

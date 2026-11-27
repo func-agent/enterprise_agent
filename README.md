@@ -610,6 +610,7 @@ docs/                  架构、API、安全、访问和运维文档
 ## 文档导航
 
 - [总体架构](docs/architecture.md)
+- [AI 工作流 V1 分析与设计（阶段 A1 已实现）](docs/workflow-v1-design.md)
 - [PDF 组件逐项映射与本机实测](docs/component-mapping.md)
 - [官方 AgentScope 对照](docs/agentscope-comparison.md)
 - [API 契约](docs/api.md)
