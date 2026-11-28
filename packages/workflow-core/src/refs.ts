@@ -7,10 +7,26 @@
  *
  * 节点 ID 不允许包含 `.`、空白或控制字符，因此按 `.` 切分不会出现歧义。
  */
+import { STRUCTURE_LIMITS } from './limits.js';
 import type { ConditionContext, TemplatedValue, WorkflowDefinition } from './types.js';
 
-/** 节点 ID 允许的字符集：首字符为字母或数字，其余为字母数字、点、下划线、连字符。 */
-export const NODE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+/** 节点 ID 允许的字符集：首字符为字母或数字，其余为字母数字、下划线、连字符。 */
+export const NODE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+
+/**
+ * 安全查表：只认自有属性。
+ *
+ * 直接 `TABLE[key]` 会从原型链上取到 `constructor` / `toString` / `__proto__` 这类继承值：
+ * 键来自不可信 JSON 时，查表结果不再是「未命中」，而是拿到一个函数或对象，
+ * 后续 `.includes()` / `.join()` 会把校验器变成异常入口（不返回问题列表，而是抛异常）。
+ *
+ * 内置表另外建成 null 原型对象做双保险；调用方传入的表（如节点实现版本白名单）
+ * 只能靠这个函数兜住。
+ */
+export function ownEntry<T extends object>(table: T, key: string): T[keyof T] | undefined {
+  if (!Object.prototype.hasOwnProperty.call(table, key)) return undefined;
+  return (table as Record<string, T[keyof T]>)[key];
+}
 
 /** 引用的目标类型。 */
 export type RefTarget =
@@ -60,7 +76,11 @@ export function resolveRef(ref: string, ctx: ConditionContext): RefResolution {
     }
     return { valid: true, found: true, value: source[target.field] };
   }
-  const node = ctx.nodes?.[target.nodeId];
+  const nodes = ctx.nodes;
+  if (!nodes || !Object.prototype.hasOwnProperty.call(nodes, target.nodeId)) {
+    return { valid: true, found: false };
+  }
+  const node = nodes[target.nodeId];
   if (!node || !node.output) return { valid: true, found: false };
   if (!Object.prototype.hasOwnProperty.call(node.output, target.field)) {
     return { valid: true, found: false };
@@ -71,10 +91,11 @@ export function resolveRef(ref: string, ctx: ConditionContext): RefResolution {
 /**
  * 递归收集配置片段里出现的全部 `$ref`。
  *
- * 深度上限 64，与审计侧的嵌套深度限制一致，避免深结构导致的栈溢出。
+ * 深度上限与节点配置深度上限一致（`STRUCTURE_LIMITS.maxConfigDepth`），
+ * 避免深结构导致的栈溢出，也避免引用收集与配置校验两套魔数漂移。
  */
 export function collectRefs(value: TemplatedValue, acc: string[] = [], depth = 0): string[] {
-  if (depth > 64) return acc;
+  if (depth > STRUCTURE_LIMITS.maxConfigDepth) return acc;
   if (Array.isArray(value)) {
     for (const item of value) collectRefs(item, acc, depth + 1);
     return acc;

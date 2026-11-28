@@ -2,7 +2,7 @@
  * 工作流领域类型 —— 见 docs/workflow-v1-design.md 第 5、6、7 节。
  *
  * 本包只放**纯领域逻辑**：不依赖 Express、React、AG-UI、Keycloak 或任何 Provider 实现，
- * 不读环境变量、不做 IO。执行所需的外部能力一律通过端口接口注入（见 ports.ts）。
+ * 不读环境变量、不直接管理网络或数据库连接。执行所需的外部能力通过 A3 端口接口注入。
  */
 
 /** 节点类型 —— V1 支持的八种。 */
@@ -16,25 +16,53 @@ export type WorkflowNodeType =
   | 'approval'
   | 'output';
 
-/** 条件节点的分支出口。 */
-export type BranchKind = 'true' | 'false';
+/**
+ * 节点的分支出口标记。
+ *
+ * 条件节点用 `true / false`，人工审核节点用 `approved / rejected`；
+ * 两套取值互不通用，由 `NODE_BRANCH_VALUES` 统一登记。
+ */
+export type BranchKind = 'true' | 'false' | 'approved' | 'rejected';
+
+/**
+ * 各节点类型允许的分支取值。
+ *
+ * 未列出的节点类型**不允许**携带 `branch`；列出的节点类型只能取表内的值。
+ * 校验器与运行时共用这一张表，避免两处各写一份字符串数组导致口径漂移。
+ *
+ * 表建成 **null 原型对象**：节点类型来自不可信 JSON，
+ * 用 `constructor` / `toString` 这类键查普通对象会从原型链上取到继承值，
+ * 查表结果不再是「未命中」，而是拿到一个函数 —— 校验器会因此抛异常而不是返回问题。
+ */
+export const NODE_BRANCH_VALUES: Partial<Record<WorkflowNodeType, readonly BranchKind[]>> = Object.assign(
+  Object.create(null) as Partial<Record<WorkflowNodeType, readonly BranchKind[]>>,
+  {
+    condition: ['true', 'false'],
+    approval: ['approved', 'rejected'],
+  },
+);
 
 /**
  * 平台当前支持的 (节点类型, 实现版本) 组合。
  *
  * 顶层 `schemaVersion` 管的是**定义结构**，`implVersion` 管的是**单个节点的执行语义**，
  * 两者独立演进（见设计文档 R4）。语义不兼容的改动必须提升 `implVersion`。
+ *
+ * 同样是 null 原型对象：查表键来自不可信 JSON。
  */
-export const SUPPORTED_NODE_IMPLEMENTATIONS: Readonly<Record<WorkflowNodeType, readonly number[]>> = {
-  input: [1],
-  output: [1],
-  llm: [1],
-  knowledge: [1],
-  tool: [1],
-  condition: [1],
-  agent: [1],
-  approval: [1],
-};
+export const SUPPORTED_NODE_IMPLEMENTATIONS: Readonly<Record<WorkflowNodeType, readonly number[]>> = Object.assign(
+  Object.create(null) as Record<WorkflowNodeType, readonly number[]>,
+  {
+    input: [1],
+    output: [1],
+    llm: [1],
+    knowledge: [1],
+    tool: [1],
+    condition: [1],
+    agent: [1],
+    approval: [1],
+  },
+);
 
 /** 定义结构版本。 */
 export const SUPPORTED_SCHEMA_VERSIONS: readonly number[] = [1];
@@ -77,20 +105,24 @@ export interface InputNodeConfig {
   fields?: string[];
 }
 
+/** LLM 提示词片段。 */
+export type PromptFragment = string | RefValue;
+
 /** LLM 节点配置。 */
 export interface LlmNodeConfig {
   /** 虚拟模型名；不允许填写真实 Provider、Base URL 或 API Key。 */
   model?: string;
-  systemPrompt?: string;
-  userPrompt?: string;
+  systemPrompt?: string | PromptFragment[];
+  userPrompt?: string | PromptFragment[];
   maxOutputTokens?: number;
-  outputSchema?: JsonSchema;
 }
 
 /** 知识检索节点配置。 */
 export interface KnowledgeNodeConfig {
   query?: TemplatedValue;
   topK?: number;
+  /** 可选逻辑知识范围；由运行者可用的 knowledgeScopes 校验。 */
+  knowledgeScope?: string;
 }
 
 /** MCP 工具节点配置。 */
@@ -105,6 +137,7 @@ export interface AgentNodeConfig {
   model?: string;
   instruction?: string;
   maxIterations?: number;
+  /** 允许 Agent 调用的工具标识，格式固定为 `serverId/tool`。 */
   allowedTools?: string[];
 }
 
@@ -150,7 +183,10 @@ export interface WorkflowEdge {
   id: string;
   source: string;
   target: string;
-  /** 条件节点的分支标记；普通节点不带。 */
+  /**
+   * 分支出口标记：条件节点取 `true/false`，人工审核节点取 `approved/rejected`；
+   * 其它节点类型不带。
+   */
   branch?: BranchKind;
 }
 
@@ -229,18 +265,46 @@ export interface ValidationIssue {
   path?: string;
 }
 
+/** 单类资源的白名单校验状态。 */
+export type ResourceCheckStatus =
+  /** 当前定义使用了该资源，且已按调用者白名单校验。 */
+  | 'performed'
+  /** 当前定义使用了该资源，但调用方没有提供对应白名单。 */
+  | 'skipped'
+  /** 当前定义不使用该资源，无需校验。 */
+  | 'not_required';
+
+/** 按资源类别报告校验状态，避免部分注入被误认为整体已授权。 */
+export interface ResourceCheckSummary {
+  models: ResourceCheckStatus;
+  tools: ResourceCheckStatus;
+  knowledgeScopes: ResourceCheckStatus;
+}
+
 /** 校验结果。 */
 export interface ValidationResult {
   ok: boolean;
   issues: ValidationIssue[];
+  /**
+   * 每类资源是否真正完成白名单校验。
+   *
+   * 发布、启动和恢复接口必须拒绝任何所需类别为 `skipped` 的结果；
+   * `ok: true` 只表示定义结构合法，不代表资源已授权。
+   */
+  resourceCheck: ResourceCheckSummary;
 }
 
-/** 条件 AST —— 结构化，不接受任意表达式。 */
+/**
+ * 条件 AST —— 结构化，不接受任意表达式。
+ *
+ * 二元算子必须带 `right`；一元算子（`exists / not_exists / is_true / is_false`）
+ * **不接受** `right`，带上会被校验拒绝。
+ */
 export type ConditionExpr =
   | { all: ConditionExpr[] }
   | { any: ConditionExpr[] }
   | { not: ConditionExpr }
-  | { left: TemplatedValue; operator: ConditionOperator; right: TemplatedValue };
+  | { left: TemplatedValue; operator: ConditionOperator; right?: TemplatedValue };
 
 /** 条件算子。 */
 export type ConditionOperator =
@@ -277,9 +341,18 @@ export interface WorkflowResourceScope {
 
 /** 校验上下文：决定「当前用户可用的逻辑资源」。 */
 export interface ValidationContext {
-  /** 平台限额（业务用户只能调低）。 */
-  platformLimits?: WorkflowLimits;
-  /** 当前用户可用的资源；缺省表示不做资源白名单校验。 */
+  /**
+   * 平台限额（业务用户只能调低）。
+   *
+   * 可以只覆盖其中几项，缺失项按内置 `PLATFORM_LIMIT_CAPS` 处理。
+   */
+  platformLimits?: Partial<WorkflowLimits>;
+  /**
+   * 当前用户可用的资源；缺省表示不做资源白名单校验。
+   *
+   * 缺省时，当前定义实际使用的资源类别在 `resourceCheck` 中标记为 `skipped`，
+   * 未使用的类别标记为 `not_required`。
+   */
   resources?: WorkflowResourceScope;
   /** 已支持的节点实现版本表；缺省用内置白名单。 */
   nodeImplementations?: Readonly<Record<WorkflowNodeType, readonly number[]>>;

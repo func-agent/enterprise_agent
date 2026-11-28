@@ -13,5 +13,8 @@
   },
   "scripts": {
     "build": "tsc -b"
+  },
+  "devDependencies": {
+    "@eap/platform-core": "1.0.0"
   }
 }

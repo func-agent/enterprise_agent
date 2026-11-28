@@ -4,6 +4,7 @@ export * from './crypto.js';
 export * from './logger.js';
 export * from './ids.js';
 export * from './store/metadata.js';
+export * from './store/workflow.js';
 export * from './store/object.js';
 export * from './store/pg.js';
 export * from './auth/dev-token.js';
