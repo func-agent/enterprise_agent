@@ -553,7 +553,7 @@ realm 导入是**严格反序列化**，任何未知字段（如 `description`�
    manifest digest 必然变化，但镜像内容（层）一模一样。所以要比 **RootFS 层指纹**。
 
 
-## 十一、AI 工作流编排（V1，规划中）
+## 十一、AI 工作流编排（V1，分阶段实施中）
 
 > **方案书没有这个组件。** 方案 3.1 的 17 个组件里没有工作流编排引擎，
 > 3.2 明确排除 **Dify**（原话：「首期用 AgentScope ReAct，确有需求再外挂」）。
@@ -564,7 +564,7 @@ realm 导入是**严格反序列化**，任何未知字段（如 `description`�
 
 | 组件 | 优先级 | 方案要求 | 本项目实现 | 状态 |
 |---|---|---|---|---|
-| 工作流编排（自研，对应方案书 Dify 的位置） | V1 规划 | 方案 3.1/3.2 未列该组件 | `packages/workflow-core/`（领域逻辑：类型 / DAG 校验 / 条件求值 / Schema 子集 / 引用解析，**A1 已实现**）+ `packages/agent-core/src/workflow/`（路由与端口适配，A2 起）+ `apps/webui/`（React Flow 编辑器，阶段 C） | 🟡 阶段 A1 已实现（37 例单测），A2 起未开始 |
+| 工作流编排（自研，对应方案书 Dify 的位置） | V1 分阶段实施 | 方案 3.1/3.2 未列该组件 | `packages/workflow-core/`（领域逻辑与运行时，**A1/A3 已实现**）+ `packages/platform-core/src/store/workflow.ts`（双存储契约，**A2 已实现**）+ `packages/agent-core/src/workflow/`（路由与端口适配，阶段 B）+ `apps/webui/`（React Flow 编辑器，阶段 C） | 🟡 A1 100 例单测；A2 SQLite 36 例 / PostgreSQL 36 例契约实测通过；A3 38 例调度与状态机测试通过；阶段 B 起未开始 |
 
 **与被排除的 Dify 的差异**：
 
@@ -586,7 +586,7 @@ realm 导入是**严格反序列化**，任何未知字段（如 `description`�
 | ✅ 真实组件实测 | 9 | Infinity（0.7.5 平台侧 + 0.6.5 RAGFlow 专用）、Keycloak、Langfuse、ClickHouse、TEI、**RAGFlow v0.22.1**、**DB-GPT 0.8.3**、**Envoy 1.31（出网代理）**、**Harbor 2.15.5（离线镜像仓）**（+ 重型栈自带的 PostgreSQL / Redis / MinIO / MySQL） |
 | ✅ 自研实现并有测试 | 7 | AgentScope Core/Service、Web UI、agentgateway、鉴权中间件、商业模型接入、存储抽象层、**DB-GPT 的 MCP Server 适配器**（平台侧集成） |
 | 🟡 接口等价的本地实现 | 1 | 平台侧 RAGFlow 工具层（平台侧 DB-GPT ChatBI 工具层已下沉到 DB-GPT 本体，仅保留为 fallback） |
-| 📦 仅编排交付 | 1 | AI 工作流编排（自研 `packages/workflow-core`，对应方案书被排除的 Dify 位置；**阶段 A1 已实现**，A2 起未开始） |
+| 📦 仅编排交付 | 1 | AI 工作流编排（自研 `packages/workflow-core` + `platform-core` 双存储；**A1/A2/A3 已实现**，阶段 B 起未开始） |
 
 > 🟡 指的是**平台 MCP Hub 侧的等价工具层**（`knowledge.search` 等），并非组件本身是模拟的 ——
 > RAGFlow 与 DB-GPT 组件本体均已用**真实容器**拉起并跑通端到端功能。
